@@ -2,7 +2,7 @@ import math
 import os
 import statistics
 # Assuming KATO structure is available, keep this path as is if required by the environment
-from KATO.Data.lyngspice_master.lyngspice_master.lyngspice.lyngspice import NgSpice
+from ngspice_runner import NgSpice  # was: lyngspice (replaced for GF180MCU compat)
 import numpy as np
 import torch
 import time

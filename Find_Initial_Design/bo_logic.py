@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 from botorch.optim import optimize_acqf
 
-# Import simulation functions (assuming these functions are correctly defined in KATO.Data)
-from KATO.Data.lyngspice_master.lyngspice_master.examples.simulation_OTA_two1 import *
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'examples'))
+from simulation_OTA_two import OTA_two_simulation_gmid_pro
 import numpy as np
 import random
 import time
@@ -13,14 +14,15 @@ from botorch.fit import fit_gpytorch_mll
 from botorch.models.transforms.outcome import Standardize
 from botorch.acquisition import ExpectedImprovement, ScalarizedObjective, UpperConfidenceBound
 from gpytorch.mlls import ExactMarginalLogLikelihood
-from GPy.models import SparseGPRegression
-from KATO.utils.util import seed_set
 import copy
 import pandas as pd
-import os
 import logging
 import math
 from scipy.interpolate import interp1d
+
+# --- Path Configuration ---
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GMID_LUT_DIR = os.path.join(_PROJECT_ROOT, "gmid_LUT")
 
 
 
@@ -65,8 +67,7 @@ def calculate_zero(L_below, L_above, idoverw_below, idoverw_above, aim_L):
 def calculate_w_linear_NMOS_pro(aim_L, aim_I, gmid, logger):
     """Calculates the W value of an NMOS transistor using LUT lookup logic."""
     try:
-        # Try relative path
-        lut_file_path = f'./gmid_LUT/nmos_gmid{int(gmid)}.csv'
+        lut_file_path = os.path.join(GMID_LUT_DIR, f'nmos_gmid{int(gmid)}.csv')
         df = pd.read_csv(lut_file_path)
 
         L_values = df[f'L (GM/ID=ID/W (GM/ID={int(gmid)}))'].values
@@ -89,8 +90,7 @@ def calculate_w_linear_NMOS_pro(aim_L, aim_I, gmid, logger):
 def calculate_w_linear_PMOS_pro(aim_L, aim_I, gmid, logger):
     """Calculates the W value of a PMOS transistor using LUT lookup logic."""
     try:
-        # Try relative path
-        lut_file_path = f'./gmid_LUT/pmos_gmid{int(gmid)}.csv'
+        lut_file_path = os.path.join(GMID_LUT_DIR, f'pmos_gmid{int(gmid)}.csv')
         df = pd.read_csv(lut_file_path)
 
         L_values = df[f'L (GM/ID=ID/W (GM/ID={int(gmid)}))'].values

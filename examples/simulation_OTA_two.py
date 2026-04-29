@@ -1,8 +1,7 @@
 import math
 import os
 import statistics
-# Assuming KATO structure is available, keep this path as is if required by the environment
-from ngspice_runner import NgSpice  # was: lyngspice (replaced for GF180MCU compat)
+from ngspice_runner import NgSpice
 import numpy as np
 import torch
 import time
@@ -13,14 +12,17 @@ from scipy.interpolate import interp1d
 # Prevent OpenMP runtime errors on some systems
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
+# --- Path Configuration ---
+# All paths are resolved relative to the ASTRA project root directory
+_CURRENT_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_CURRENT_FILE_DIR)
 
-# Netlist file paths (assuming they are in a 'netlists' folder relative to the script)
-file_path_OTA_two_gmid_new = os.path.join(current_dir, "netlists", "ICCAD_OTA_two_new.cir")
-file_path_OTA_two_all = os.path.join(current_dir, 'netlists', 're_OTA_two_all_netlist.cir')
+# Netlist file paths
+file_path_OTA_two_gmid_new = os.path.join(_CURRENT_FILE_DIR, "netlists", "ICCAD_OTA_two_new.cir")
+file_path_OTA_two_all = os.path.join(_CURRENT_FILE_DIR, 'netlists', 're_OTA_two_all_netlist.cir')
 
-# Base directory for Look-Up Tables (LUTs)
-GMID_LUT_DIR = os.path.join(current_dir, "gmid_LUT")
+# Base directory for Look-Up Tables (LUTs) - located at project root
+GMID_LUT_DIR = os.path.join(_PROJECT_ROOT, "gmid_LUT")
 
 
 def find_closest_points_indices(lst, aim_L):
@@ -414,7 +416,7 @@ def write_data_OTA_two_gmid_pro(filename, cap=3e-12, k1=1, k2=8, l1=2e-6, l2=2e-
     """
     src_file = filename
     # Updated: use a temporary file path in the current directory
-    new_file = os.path.join(current_dir, 'temp_ICCAD_OTA_two_new2.cir')
+    new_file = os.path.join(_CURRENT_FILE_DIR, 'temp_ICCAD_OTA_two_new2.cir')
     shutil.copy(src_file, new_file)
 
     # Open file and read content
@@ -493,7 +495,7 @@ def write_data_OTA_two_all(filename, cap=3e-12, l1=8e-7, l2=8e-7, l3=8e-7, l4=1e
     """
     src_file = filename
     # Updated: use a temporary file path in the current directory
-    new_file = os.path.join(current_dir, 'temp_retest_OTA_two_all_netlist_new.cir')
+    new_file = os.path.join(_CURRENT_FILE_DIR, 'temp_retest_OTA_two_all_netlist_new.cir')
     shutil.copy(src_file, new_file)
 
     # Open file and read content

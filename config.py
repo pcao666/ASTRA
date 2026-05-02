@@ -21,8 +21,8 @@ PATHS = {
 # Process / Technology Node
 # ---------------------------------------------------------------------------
 PROCESS = {
-    "min_w": 180e-9,          # Minimum transistor width (m)
-    "min_l": 180e-9,          # Minimum transistor length (m)
+    "min_w": 220e-9,          # Minimum transistor width (m) — GF180MCU
+    "min_l": 280e-9,          # Minimum transistor length (m) — GF180MCU 3.3V
     "vdd": 3.3,               # Supply voltage (V)
     "dc_current_offset": 8e-5, # Offset subtracted from simulated branch current
 }
@@ -85,11 +85,11 @@ STAGE1_PARAM_RANGES = [
     (0.5e-12, 4e-11),   # cap (0)
     (0.3, 8),            # k1  (1)
     (0.3, 8),            # k2  (2)
-    (1.8e-7, 5e-6),     # l1  (3)
-    (1.8e-7, 5e-6),     # l2  (4)
-    (1.8e-7, 5e-6),     # l3  (5)
-    (1.8e-7, 5e-6),     # l4  (6)
-    (1.8e-7, 5e-6),     # l5  (7)
+    (2.8e-7, 5e-6),     # l1  (3)  — GF180MCU 3.3V min L = 280nm
+    (2.8e-7, 5e-6),     # l2  (4)
+    (2.8e-7, 5e-6),     # l3  (5)
+    (2.8e-7, 5e-6),     # l4  (6)
+    (2.8e-7, 5e-6),     # l5  (7)
     (100, 10000),        # r   (8)
 ]
 

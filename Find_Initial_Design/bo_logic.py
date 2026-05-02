@@ -2,113 +2,27 @@
 from botorch.optim import optimize_acqf
 
 import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'examples'))
+
 from simulation_OTA_two import OTA_two_simulation_gmid_pro
+from lut_utils import (
+    calculate_w_linear_NMOS_pro,
+    calculate_w_linear_PMOS_pro,
+)
+from constraint_utils import check_feasibility
+from config import STAGE1_PARAM_RANGES, BIAS, BO_HYPERPARAMS
 import numpy as np
 import random
 import time
 import torch
-import botorch
 from botorch.models import SingleTaskGP
 from botorch.fit import fit_gpytorch_mll
 from botorch.models.transforms.outcome import Standardize
-from botorch.acquisition import ExpectedImprovement, ScalarizedObjective, UpperConfidenceBound
+from botorch.acquisition import ScalarizedObjective, UpperConfidenceBound
 from gpytorch.mlls import ExactMarginalLogLikelihood
 import copy
-import pandas as pd
 import logging
-import math
-from scipy.interpolate import interp1d
-
-# --- Path Configuration ---
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GMID_LUT_DIR = os.path.join(_PROJECT_ROOT, "gmid_LUT")
-
-
-
-
-def find_closest_points_indices(lst, aim_L):
-    """
-    Finds the indices of points in the list closest to the target L value for linear interpolation.
-    """
-    lst = np.array(lst)
-
-    below_indices = np.where(lst <= aim_L)[0]
-    above_indices = np.where(lst >= aim_L)[0]
-
-    if len(below_indices) > 0:
-        idx_below = below_indices[-1]
-    else:
-        idx_below = above_indices[0] if len(above_indices) > 0 else 0
-
-    if len(above_indices) > 0:
-        idx_above = above_indices[0]
-    else:
-        idx_above = below_indices[-1] if len(below_indices) > 0 else 0
-
-    if idx_below == idx_above and idx_above < len(lst) - 1:
-        idx_above += 1
-    elif idx_below == idx_above and idx_below > 0:
-        idx_below -= 1
-
-    return int(idx_below), int(idx_above)
-
-
-def calculate_zero(L_below, L_above, idoverw_below, idoverw_above, aim_L):
-    """Calculates the ID/W value via linear interpolation (f_LUT)."""
-    if L_below == L_above:
-        return idoverw_below
-
-    # Use interp1d for more robust interpolation
-    interp_func = interp1d([L_below, L_above], [idoverw_below, idoverw_above], fill_value="extrapolate")
-    return interp_func(aim_L).item()
-
-
-def calculate_w_linear_NMOS_pro(aim_L, aim_I, gmid, logger):
-    """Calculates the W value of an NMOS transistor using LUT lookup logic."""
-    try:
-        lut_file_path = os.path.join(GMID_LUT_DIR, f'nmos_gmid{int(gmid)}.csv')
-        df = pd.read_csv(lut_file_path)
-
-        L_values = df[f'L (GM/ID=ID/W (GM/ID={int(gmid)}))'].values
-        gm_values = df['ID/W'].values
-
-        idx_below, idx_above = find_closest_points_indices(L_values, aim_L)
-
-        L_below, L_above = L_values[idx_below], L_values[idx_above]
-        idoverw_below, idoverw_above = gm_values[idx_below], gm_values[idx_above]
-
-        result_idoverw = calculate_zero(L_below, L_above, idoverw_below, idoverw_above, aim_L)
-        result_w = aim_I / result_idoverw
-
-        return max(result_w, 0.18e-6)  # Ensure W is not less than the minimum width
-    except Exception as e:
-        logger.error(f"  - Error: W_NMOS ({gmid}) LUT lookup failed (L={aim_L:.2e}, I={aim_I:.2e}). Attempted file: {lut_file_path}. Error: {e}")
-        return 0.18e-6
-
-
-def calculate_w_linear_PMOS_pro(aim_L, aim_I, gmid, logger):
-    """Calculates the W value of a PMOS transistor using LUT lookup logic."""
-    try:
-        lut_file_path = os.path.join(GMID_LUT_DIR, f'pmos_gmid{int(gmid)}.csv')
-        df = pd.read_csv(lut_file_path)
-
-        L_values = df[f'L (GM/ID=ID/W (GM/ID={int(gmid)}))'].values
-        gm_values = df['ID/W'].values
-
-        idx_below, idx_above = find_closest_points_indices(L_values, aim_L)
-
-        L_below, L_above = L_values[idx_below], L_values[idx_above]
-        idoverw_below, idoverw_above = gm_values[idx_below], gm_values[idx_above]
-
-        result_idoverw = calculate_zero(L_below, L_above, idoverw_below, idoverw_above, aim_L)
-        result_w = aim_I / result_idoverw
-
-        return max(result_w, 0.18e-6)
-    except Exception as e:
-        logger.error(f"  - Error: W_PMOS ({gmid}) LUT lookup failed (L={aim_L:.2e}, I={aim_I:.2e}). Attempted file: {lut_file_path}. Error: {e}")
-        return 0.18e-6
-
 
 
 def normalize(tensor, bounds):
@@ -134,24 +48,13 @@ class BayesianOptimization():
 
         # --- Setup ---
         logger.info("--- Bayesian Optimization (Stage 1) find method started ---")
-        # 9 parameters for GP training (Cap, k1, k2, L1-L5, R)
-        param_ranges_9dim = [
-            (0.5e-12, 4e-11),  # cap (0)
-            (0.3, 8),  # k1 (1)
-            (0.3, 8),  # k2 (2)
-            (1.8e-7, 5e-6),  # l1 (3)
-            (1.8e-7, 5e-6),  # l2 (4)
-            (1.8e-7, 5e-6),  # l3 (5)
-            (1.8e-7, 5e-6),  # l4 (6)
-            (1.8e-7, 5e-6),  # l5 (7)
-            (100, 10000)  # r (8)
-        ]
+        # 9 parameters for GP training (Cap, k1, k2, L1-L5, R) — from config
+        param_ranges_9dim = STAGE1_PARAM_RANGES
 
-        # 9-dim bounds (for optimize_acqf)
-        bound = torch.log(torch.tensor([
-            [0.5e-12, 0.3, 0.3, 1.8e-7, 1.8e-7, 1.8e-7, 1.8e-7, 1.8e-7, 100],  # Lower bounds
-            [4e-11, 8, 8, 5e-6, 5e-6, 5e-6, 5e-6, 5e-6, 10000]  # Upper bounds
-        ], dtype=torch.float64))
+        # 9-dim bounds (for optimize_acqf) — derived from config ranges
+        lower_bounds = [r[0] for r in STAGE1_PARAM_RANGES]
+        upper_bounds = [r[1] for r in STAGE1_PARAM_RANGES]
+        bound = torch.log(torch.tensor([lower_bounds, upper_bounds], dtype=torch.float64))
 
         # In-memory data for GP training (log X, raw Y)
         dbx_alter = torch.empty(0, 9, dtype=torch.float64)  # 9 log space inputs
@@ -213,11 +116,13 @@ class BayesianOptimization():
             # --- Core Fix: Calculate W and write 12-dimensional data ---
             try:
                 # 1. Calculate Ws (using user-provided gmid values)
-                w1 = calculate_w_linear_NMOS_pro(l1, 20e-6 * k1, gmid1, logger)  # M1 (NMOS)
-                w2 = calculate_w_linear_PMOS_pro(l2, 40e-6 * k2, gmid2, logger)  # M3 (PMOS)
-                w3 = calculate_w_linear_PMOS_pro(l3, 20e-6 * k1, gmid3, logger)  # M5 (PMOS)
-                w4 = calculate_w_linear_NMOS_pro(l4, 40e-6 * k1, gmid4, logger)  # M7 (NMOS)
-                w5 = calculate_w_linear_NMOS_pro(l5, 40e-6 * k2, gmid5, logger)  # M9 (NMOS)
+                I_ref = BIAS["I_ref"]
+                I_s2 = I_ref * BIAS["stage2_factor"]
+                w1 = calculate_w_linear_NMOS_pro(l1, I_ref * k1, gmid1, logger)  # M1 (NMOS)
+                w2 = calculate_w_linear_PMOS_pro(l2, I_s2 * k2, gmid2, logger)  # M3 (PMOS)
+                w3 = calculate_w_linear_PMOS_pro(l3, I_ref * k1, gmid3, logger)  # M5 (PMOS)
+                w4 = calculate_w_linear_NMOS_pro(l4, I_s2 * k1, gmid4, logger)  # M7 (NMOS)
+                w5 = calculate_w_linear_NMOS_pro(l5, I_s2 * k2, gmid5, logger)  # M9 (NMOS)
 
                 # 2. Prepare 12-dimensional X data row (Cap, L1-L5, R, W1-W5)
                 x_data_list_12dim = (
@@ -280,7 +185,7 @@ class BayesianOptimization():
             objective = ScalarizedObjective(
                 weights=torch.tensor([1.0, 1.0, 1.0, 1.0], dtype=torch.float64))
             posterior_transform = Standardize(m=dby_alter.shape[1])
-            ucb = UpperConfidenceBound(gp, beta=0.1, objective=objective, posterior_transform=posterior_transform)
+            ucb = UpperConfidenceBound(gp, beta=BO_HYPERPARAMS["stage1"]["beta"], objective=objective, posterior_transform=posterior_transform)
 
             logger.info("  - Optimizing Acquisition Function (UCB)...")
             try:
@@ -288,8 +193,8 @@ class BayesianOptimization():
                     acq_function=ucb,
                     bounds=bound,
                     q=1,
-                    num_restarts=1,
-                    raw_samples=20,
+                    num_restarts=BO_HYPERPARAMS["stage1"]["num_restarts"],
+                    raw_samples=BO_HYPERPARAMS["stage1"]["raw_samples"],
                 )
                 logger.info("  - Acquisition function optimization complete.")
             except Exception as e:
@@ -323,11 +228,13 @@ class BayesianOptimization():
             # --- Streaming Output: Write Optimization Data (12-dimensional X) ---
             try:
                 # 1. Calculate Ws (using user-provided gmid values)
-                w1 = calculate_w_linear_NMOS_pro(l1, 20e-6 * k1, gmid1, logger)  # M1 (NMOS)
-                w2 = calculate_w_linear_PMOS_pro(l2, 40e-6 * k2, gmid2, logger)  # M3 (PMOS)
-                w3 = calculate_w_linear_PMOS_pro(l3, 20e-6 * k1, gmid3, logger)  # M5 (PMOS)
-                w4 = calculate_w_linear_NMOS_pro(l4, 40e-6 * k1, gmid4, logger)  # M7 (NMOS)
-                w5 = calculate_w_linear_NMOS_pro(l5, 40e-6 * k2, gmid5, logger)  # M9 (NMOS)
+                I_ref = BIAS["I_ref"]
+                I_s2 = I_ref * BIAS["stage2_factor"]
+                w1 = calculate_w_linear_NMOS_pro(l1, I_ref * k1, gmid1, logger)  # M1 (NMOS)
+                w2 = calculate_w_linear_PMOS_pro(l2, I_s2 * k2, gmid2, logger)  # M3 (PMOS)
+                w3 = calculate_w_linear_PMOS_pro(l3, I_ref * k1, gmid3, logger)  # M5 (PMOS)
+                w4 = calculate_w_linear_NMOS_pro(l4, I_s2 * k1, gmid4, logger)  # M7 (NMOS)
+                w5 = calculate_w_linear_NMOS_pro(l5, I_s2 * k2, gmid5, logger)  # M9 (NMOS)
 
                 # 2. Prepare 12-dimensional X data row
                 x_data_list_12dim = (
@@ -356,8 +263,8 @@ class BayesianOptimization():
             except Exception as e:
                 logger.error(f"  - Error: Failed to write optimization data to CSV: {e}")
 
-            # Check constraints
-            if test_Y[:, 0] > 60 and test_Y[:, 1] < 3e-4 and test_Y[:, 2] > 60 and test_Y[:, 3] > 5e6:
+            # Check constraints (using unified check from constraint_utils)
+            if check_feasibility(test_Y):
                 logger.info("******************************************")
                 logger.info("*** Feasible solution found! Task terminated early. ***")
                 logger.info("******************************************")

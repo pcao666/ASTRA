@@ -4,6 +4,9 @@ import numpy as np
 import torch
 import math
 import pandas as pd
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from config import PROCESS
 
 
 def seed_set(seed: int, logger=None):
@@ -33,13 +36,13 @@ def seed_set(seed: int, logger=None):
 def set_param_ranges(param_initial_value: float, percentage: float = 0.35, is_width_or_length: bool = False) -> list:
     """
     Calculates parameter min/max ranges based on an initial value and a percentage.
-    Ensures minimum width/length constraints (0.18e-6) if applicable.
+    Ensures minimum width/length constraints from config if applicable.
     """
     param_min = param_initial_value * (1 - percentage)
     param_max = param_initial_value * (1 + percentage)
     if is_width_or_length:
-        # Ensure min is not less than technology minimum
-        param_min = max(param_min, torch.tensor(0.18e-6, dtype=torch.double))
+        tech_min = min(PROCESS["min_w"], PROCESS["min_l"])
+        param_min = max(param_min, torch.tensor(tech_min, dtype=torch.double))
     return [param_min, param_max]
 
 

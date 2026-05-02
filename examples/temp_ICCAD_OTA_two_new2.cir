@@ -1,5 +1,6 @@
-.PARAM cap=2.0pf l1=1.00u l2=1.00u l3=1.00u l4=1.00u l5=1.00u r=3000.0 w1=28.63u w2=120.70u w3=37.71u w4=28.49u w5=57.26u 
-* Two-Stage Miller OTA - GF180MCU - W<100u, L>=0.28u
+* Two-Stage Miller OTA - GF180MCU - Parametric
+.PARAM cap=5.5pf l1=0.74u l2=0.47u l3=0.44u l4=2.06u l5=4.04u r=175.81145416433864 w1=47.33u w2=84.65u w3=29.87u w4=70.99u w5=94.52u w_tail=99.02u nf1=1 nf2=2 nf3=1 nf4=2 nf5=11 nf_tail=21
+
 .include '/home/admin/gf180mcu-pdk/libraries/gf180mcu_fd_pr/latest/models/ngspice/design.ngspice'
 .lib '/home/admin/gf180mcu-pdk/libraries/gf180mcu_fd_pr/latest/models/ngspice/sm141064.ngspice' typical
 .param sw_stat_mismatch = 0
@@ -8,22 +9,22 @@ V0 vdd 0 DC 3.3
 
 * BIAS: 20uA ref
 Ibias vdd vbn DC 20u
-XMbn vbn vbn 0 0 nmos_3p3 w=5u l=2u
+XMbn vbn vbn 0 0 nmos_3p3 w=w5 nf=nf5 l=l5
 
 * STAGE 1
-XM5 net_tail vbn 0 0 nmos_3p3 w=10u l=2u
-XM1a net1 net3 net_tail 0 nmos_3p3 w=20u l=1u
-XM1b net2 inn net_tail 0 nmos_3p3 w=20u l=1u
-XM2a net1 net1 vdd vdd pmos_3p3 w=40u l=1u
-XM2b net2 net1 vdd vdd pmos_3p3 w=40u l=1u
+XM5 net_tail vbn 0 0 nmos_3p3 w=w_tail nf=nf_tail l=l5
+XM1a net1 net3 net_tail 0 nmos_3p3 w=w1 nf=nf1 l=l1
+XM1b net2 inn net_tail 0 nmos_3p3 w=w1 nf=nf1 l=l1
+XM2a net1 net1 vdd vdd pmos_3p3 w=w2 nf=nf2 l=l2
+XM2b net2 net1 vdd vdd pmos_3p3 w=w2 nf=nf2 l=l2
 
 * STAGE 2
-XM3 net4 net2 vdd vdd pmos_3p3 w=80u l=0.6u
-XM4 net4 vbn 0 0 nmos_3p3 w=25u l=2u
+XM3 net4 net2 vdd vdd pmos_3p3 w=w3 nf=nf3 l=l3
+XM4 net4 vbn 0 0 nmos_3p3 w=w4 nf=nf4 l=l4
 
 * Compensation
-Cc net4 net_cc 2p
-Rc net_cc net2 3000
+Cc net4 net_cc {cap}
+Rc net_cc net2 {r}
 
 Vcm inn 0 DC 1.65
 Vinp net3 0 DC 1.65 AC 1

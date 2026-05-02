@@ -22,9 +22,20 @@ from lut_utils import (
 # Prevent OpenMP runtime errors on some systems
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+_CURRENT_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Netlist file paths
 file_path_OTA_two_gmid_new = os.path.join(PATHS["netlist_dir"], "ICCAD_OTA_two_new.cir")
 file_path_OTA_two_all = os.path.join(PATHS["netlist_dir"], 're_OTA_two_all_netlist.cir')
+
+# GF180MCU nmos_3p3/pmos_3p3 max single-finger width
+_WMAX_PER_FINGER = 100e-6
+
+
+def _split_nf(total_w):
+    """Calculate nf and per-finger width so each finger <= _WMAX_PER_FINGER."""
+    nf = max(1, math.ceil(total_w / _WMAX_PER_FINGER))
+    return total_w / nf, nf
 
 
 # This function finds the two points closest to 0dB gain (for GBW/PM calculation)
@@ -346,25 +357,36 @@ def write_data_OTA_two_gmid_pro(filename, cap=3e-12, k1=1, k2=8, l1=2e-6, l2=2e-
         w5 = 1e-9
 
     # 2. Format parameters for netlist (using u and p suffixes)
+    # Split wide transistors into nf fingers (GF180MCU wmax per finger = 100u)
+    w1_pf, nf1 = _split_nf(w1)
+    w2_pf, nf2 = _split_nf(w2)
+    w3_pf, nf3 = _split_nf(w3)
+    w4_pf, nf4 = _split_nf(w4)
+    w5_pf, nf5 = _split_nf(w5)
+    w_tail_total = w5 * 2
+    w_tail_pf, nf_tail = _split_nf(w_tail_total)
+
     cap_f = format(cap * 1e12, ".1f")
     l1_f = format(l1 * 1e6, ".2f")
     l2_f = format(l2 * 1e6, ".2f")
     l3_f = format(l3 * 1e6, ".2f")
     l4_f = format(l4 * 1e6, ".2f")
     l5_f = format(l5 * 1e6, ".2f")
-    w1_f = format(w1 * 1e6, ".2f")
-    w2_f = format(w2 * 1e6, ".2f")
-    w3_f = format(w3 * 1e6, ".2f")
-    w4_f = format(w4 * 1e6, ".2f")
-    w5_f = format(w5 * 1e6, ".2f")
+    w1_f = format(w1_pf * 1e6, ".2f")
+    w2_f = format(w2_pf * 1e6, ".2f")
+    w3_f = format(w3_pf * 1e6, ".2f")
+    w4_f = format(w4_pf * 1e6, ".2f")
+    w5_f = format(w5_pf * 1e6, ".2f")
+    w_tail_f = format(w_tail_pf * 1e6, ".2f")
 
-    print(f"Param values: C={cap_f}pf, L1-L5={l1_f}u-{l5_f}u, R={r}, W1-W5={w1_f}u-{w5_f}u")
+    print(f"Param values: C={cap_f}pf, L1-L5={l1_f}u-{l5_f}u, R={r}, W1-W5={w1_f}u-{w5_f}u (per finger)")
 
     # 3. Modify the .PARAM line
     modified_lines = []
     param_line_new = (
         f".PARAM cap={cap_f}pf l1={l1_f}u l2={l2_f}u l3={l3_f}u l4={l4_f}u l5={l5_f}u r={r} "
-        f"w1={w1_f}u w2={w2_f}u w3={w3_f}u w4={w4_f}u w5={w5_f}u \n"
+        f"w1={w1_f}u w2={w2_f}u w3={w3_f}u w4={w4_f}u w5={w5_f}u w_tail={w_tail_f}u "
+        f"nf1={nf1} nf2={nf2} nf3={nf3} nf4={nf4} nf5={nf5} nf_tail={nf_tail}\n"
     )
 
     param_found = False
@@ -405,25 +427,36 @@ def write_data_OTA_two_all(filename, cap=3e-12, l1=8e-7, l2=8e-7, l3=8e-7, l4=1e
         lines = file.readlines()
 
     # Format parameters for netlist
+    # Split wide transistors into nf fingers (GF180MCU wmax per finger = 100u)
+    w1_pf, nf1 = _split_nf(w1)
+    w2_pf, nf2 = _split_nf(w2)
+    w3_pf, nf3 = _split_nf(w3)
+    w4_pf, nf4 = _split_nf(w4)
+    w5_pf, nf5 = _split_nf(w5)
+    w_tail_total = w5 * 2
+    w_tail_pf, nf_tail = _split_nf(w_tail_total)
+
     cap_f = format(cap * 1e12, ".1f")
     l1_f = format(l1 * 1e6, ".2f")
     l2_f = format(l2 * 1e6, ".2f")
     l3_f = format(l3 * 1e6, ".2f")
     l4_f = format(l4 * 1e6, ".2f")
     l5_f = format(l5 * 1e6, ".2f")
-    w1_f = format(w1 * 1e6, ".2f")
-    w2_f = format(w2 * 1e6, ".2f")
-    w3_f = format(w3 * 1e6, ".2f")
-    w4_f = format(w4 * 1e6, ".2f")
-    w5_f = format(w5 * 1e6, ".2f")
+    w1_f = format(w1_pf * 1e6, ".2f")
+    w2_f = format(w2_pf * 1e6, ".2f")
+    w3_f = format(w3_pf * 1e6, ".2f")
+    w4_f = format(w4_pf * 1e6, ".2f")
+    w5_f = format(w5_pf * 1e6, ".2f")
+    w_tail_f = format(w_tail_pf * 1e6, ".2f")
 
-    print(f"Param values: C={cap_f}pf, L1-L5={l1_f}u-{l5_f}u, R={r}, W1-W5={w1_f}u-{w5_f}u")
+    print(f"Param values: C={cap_f}pf, L1-L5={l1_f}u-{l5_f}u, R={r}, W1-W5={w1_f}u-{w5_f}u (per finger)")
 
     # Modify the .PARAM line
     modified_lines = []
     param_line_new = (
         f".PARAM cap={cap_f}pf l1={l1_f}u l2={l2_f}u l3={l3_f}u l4={l4_f}u l5={l5_f}u r={r} "
-        f"w1={w1_f}u w2={w2_f}u w3={w3_f}u w4={w4_f}u w5={w5_f}u\n"
+        f"w1={w1_f}u w2={w2_f}u w3={w3_f}u w4={w4_f}u w5={w5_f}u w_tail={w_tail_f}u "
+        f"nf1={nf1} nf2={nf2} nf3={nf3} nf4={nf4} nf5={nf5} nf_tail={nf_tail}\n"
     )
 
     param_found = False

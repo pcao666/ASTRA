@@ -1,126 +1,30 @@
 import math
 import os
+import sys
 import statistics
+
+# Ensure project root is on sys.path so config/lut_utils are importable
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from ngspice_runner import NgSpice
 import numpy as np
 import torch
 import time
 import shutil
 import pandas as pd
-from scipy.interpolate import interp1d
+
+from config import PATHS
+from lut_utils import (
+    calculate_w_linear_NMOS_pro,
+    calculate_w_linear_PMOS_pro,
+)
 
 # Prevent OpenMP runtime errors on some systems
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-# --- Path Configuration ---
-# All paths are resolved relative to the ASTRA project root directory
-_CURRENT_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(_CURRENT_FILE_DIR)
-
 # Netlist file paths
-file_path_OTA_two_gmid_new = os.path.join(_CURRENT_FILE_DIR, "netlists", "ICCAD_OTA_two_new.cir")
-file_path_OTA_two_all = os.path.join(_CURRENT_FILE_DIR, 'netlists', 're_OTA_two_all_netlist.cir')
-
-# Base directory for Look-Up Tables (LUTs) - located at project root
-GMID_LUT_DIR = os.path.join(_PROJECT_ROOT, "gmid_LUT")
-
-
-def find_closest_points_indices(lst, aim_L):
-    """Finds the indices of the two points in lst closest to aim_L (one above, one below)."""
-    above_1_index = None
-    below_1_index = None
-
-    for i, num in enumerate(lst):
-        if num <= aim_L and (above_1_index is None or aim_L >= lst[above_1_index]):
-            above_1_index = i
-            if i + 1 == len(lst):
-                below_1_index = i
-                break
-            if lst[i + 1] > aim_L and below_1_index is None:
-                below_1_index = i + 1
-                break
-
-    if above_1_index is None:
-        if below_1_index != 0:
-            above_1_index = below_1_index - 1
-        else:
-            above_1_index = below_1_index + 1
-    if below_1_index is None:
-        if above_1_index != 0:
-            below_1_index = above_1_index - 1
-        else:
-            below_1_index = above_1_index + 1
-
-    return below_1_index, above_1_index
-
-
-def calculate_zero(L_below, L_above, idoverw_below, idoverw_above, aim_L):
-    """Performs linear interpolation to find ID/W corresponding to aim_L."""
-    # Linear interpolation: L = k * (ID/W) + b
-    k = (L_below - L_above) / (idoverw_below - idoverw_above)
-    b = L_below - k * idoverw_below
-    # Solve for ID/W when L = aim_L
-    return (aim_L - b) / k
-
-
-def calculate_w_linear_NMOS_pro(aim_L, aim_I, gmid):
-    """Calculates NMOS width based on L, ID, and GM/ID using linear interpolation on LUTs."""
-    # Read CSV file (Updated: use relative path)
-    lut_path = os.path.join(GMID_LUT_DIR, f'nmos_gmid{int(gmid)}.csv')
-    try:
-        df = pd.read_csv(lut_path)
-    except FileNotFoundError:
-        print(f"Error: NMOS LUT file not found at {lut_path}")
-        return 1e-9  # Return minimum width as fallback
-
-    # Extract L and ID/W values
-    L_values = df[f'L (GM/ID=ID/W (GM/ID={int(gmid)}))'].values
-    idoverw_values = df['ID/W'].values
-
-    if len(L_values) < 2:
-        return aim_I / 1e-6  # Safety fallback
-
-    below_1_index, above_1_index = find_closest_points_indices(L_values, aim_L)
-    L_below, L_above = L_values[below_1_index], L_values[above_1_index]
-    idoverw_below, idoverw_above = idoverw_values[below_1_index], idoverw_values[above_1_index]
-
-    result_id_over_w = calculate_zero(L_below, L_above, idoverw_below, idoverw_above, aim_L)
-
-    if result_id_over_w <= 0:
-        return 1e-9  # Safety minimum width
-
-    result_w = aim_I / result_id_over_w
-    return result_w
-
-
-def calculate_w_linear_PMOS_pro(aim_L, aim_I, gmid):
-    """Calculates PMOS width based on L, ID, and GM/ID using linear interpolation on LUTs."""
-    # Read CSV file (Updated: use relative path)
-    lut_path = os.path.join(GMID_LUT_DIR, f'pmos_gmid{int(gmid)}.csv')
-    try:
-        df = pd.read_csv(lut_path)
-    except FileNotFoundError:
-        print(f"Error: PMOS LUT file not found at {lut_path}")
-        return 1e-9  # Return minimum width as fallback
-
-    # Extract L and ID/W values
-    L_values = df[f'L (GM/ID=ID/W (GM/ID={int(gmid)}))'].values
-    idoverw_values = df['ID/W'].values
-
-    if len(L_values) < 2:
-        return aim_I / 1e-6  # Safety fallback
-
-    below_1_index, above_1_index = find_closest_points_indices(L_values, aim_L)
-    L_below, L_above = L_values[below_1_index], L_values[above_1_index]
-    idoverw_below, idoverw_above = idoverw_values[below_1_index], idoverw_values[above_1_index]
-
-    result_id_over_w = calculate_zero(L_below, L_above, idoverw_below, idoverw_above, aim_L)
-
-    if result_id_over_w <= 0:
-        return 1e-9  # Safety minimum width
-
-    result_w = aim_I / result_id_over_w
-    return result_w
+file_path_OTA_two_gmid_new = os.path.join(PATHS["netlist_dir"], "ICCAD_OTA_two_new.cir")
+file_path_OTA_two_all = os.path.join(PATHS["netlist_dir"], 're_OTA_two_all_netlist.cir')
 
 
 # This function finds the two points closest to 0dB gain (for GBW/PM calculation)
@@ -300,12 +204,11 @@ def OTA_two_simulation_gmid_pro(x, gmid1, gmid2, gmid3, gmid4, gmid5):
 
             results.append([result_gain_log, dc_current_log, phase_log, gbw_log])
 
-            results = torch.tensor(results)
-            return results
-
         except KeyError as e:
             print(f"Simulation failed or key not found: {e}")
-            return torch.tensor([[0, 0, 0, 0]])  # Return failure tensor
+            results.append([0, 0, 0, 0])
+
+    return torch.tensor(results)
 
 
 def OTA_two_simulation_all(x):
@@ -400,12 +303,11 @@ def OTA_two_simulation_all(x):
 
             results.append([result_gain_log, dc_current_log, phase_log, gbw_log])
 
-            results = torch.tensor(results)
-            return results
-
         except KeyError as e:
             print(f"Simulation failed or key not found: {e}")
-            return torch.tensor([[0, 0, 0, 0]])
+            results.append([0, 0, 0, 0])
+
+    return torch.tensor(results)
 
 
 def write_data_OTA_two_gmid_pro(filename, cap=3e-12, k1=1, k2=8, l1=2e-6, l2=2e-6, l3=2e-6, l4=1e-6, l5=1e-6,

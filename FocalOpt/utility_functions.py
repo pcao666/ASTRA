@@ -5,9 +5,6 @@ import torch
 import math
 import pandas as pd
 
-# Parameter precision setting
-torch.set_default_dtype(torch.double)
-
 
 def seed_set(seed: int, logger=None):
     """Fixes the random seed for reproducibility."""

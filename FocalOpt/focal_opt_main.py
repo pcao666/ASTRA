@@ -18,9 +18,6 @@ from .utility_functions import seed_set, get_indices_and_ranges, two_sort_and_gr
 from .ota_config import init_OTA_two
 from .mi_analysis import filter_two_rows, calculate_scores
 
-# Parameter precision setting
-torch.set_default_dtype(torch.double)
-
 # --- LLM API Configuration ---
 # Load environment variables from the .env file in the parent directory
 load_dotenv(override=True)
@@ -221,7 +218,8 @@ def run_focal_optimization(
         initial_y_csv_path: str,  # Path to the CSV of initial performance results (Y metrics, real space)
         simulation_function: callable,  # The circuit simulation function (e.g., OTA_two_simulation_all)
         task_id: str,
-        logger: logging.Logger
+        logger: logging.Logger,
+        total_iterations: int = 450  # Total iterations distributed across stages
 ) -> Tuple[str, List[float]]:
     """
     Orchestrates the multi-stage Focal Optimization process (ASTRA-FocalOpt Stage 2-4).
@@ -244,7 +242,13 @@ def run_focal_optimization(
     # --- Global Optimization Weights (ASTRA Core) ---
     w_llm = 0.5
     w_mi = 0.5
-    total_stage_iterations = 200  # Total iterations for Stages 2/3 (Stage 4 is 250)
+    # Distribute total_iterations proportionally: original ratio was 50:200:200:250
+    # Normalize to: ~11% stage1, ~22% stage2, ~22% stage3, ~44% stage4
+    _DEFAULT_TOTAL = 700  # 50 + 200 + 200 + 250
+    scale = total_iterations / _DEFAULT_TOTAL
+    iter_1 = max(int(50 * scale), 10)
+    total_stage_iterations = max(int(200 * scale), 20)  # For Stages 2/3
+    iter_4 = max(int(250 * scale), 20)
 
     # Number of feasible points from Stage 1 (used as C_i for weight normalization)
     initial_feasible_count = 0
@@ -317,7 +321,9 @@ def run_focal_optimization(
         logger.info("Total initial feasible points (C_init): %d", initial_feasible_count)
 
         objective = None
-        iter_1 = 50
+
+        logger.info("Iteration budget — Stage1: %d, Stage2/3: %d each, Stage4: %d (total requested: %d)",
+                     iter_1, total_stage_iterations, iter_4, total_iterations)
 
         bo = BayesianOptimization(
             param_ranges=param_ranges_full,
@@ -498,7 +504,6 @@ def run_focal_optimization(
 
         # --- 5. Stage 4 Optimization (All 12 Parameters) ---
         param_count = 12
-        iter_4 = 250
         logger.info("--- FocalOpt Stage 4: All %d Parameters (Final Stage) ---", param_count)
 
         # Select All 12 parameters (Top 4, Next 4, Last 4) from the ranking.

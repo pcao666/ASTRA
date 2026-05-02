@@ -230,7 +230,7 @@ def _run_focal_opt_task(
 
     try:
         # Lazy load FocalOpt logic
-        from FocalOpt.focal_opt_logic import run_focal_optimization
+        from FocalOpt.focal_opt_main import run_focal_optimization
 
         logger.info(f"--- Background Task 'FocalOpt' (Stage 2 Optimization) Started: {time.ctime()} ---")
         logger.info(f"Task ID: {task_id}")
@@ -265,7 +265,8 @@ def _run_focal_opt_task(
                 initial_y_csv_path,
                 OTA_two_simulation_all,  # Pass the full unbinding simulation function
                 task_id,
-                logger
+                logger,
+                total_iterations=iterations
             )
 
             end_time = time.time()

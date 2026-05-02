@@ -10,18 +10,15 @@ from botorch.models import SingleTaskGP
 from botorch.fit import fit_gpytorch_mll
 from botorch.optim import optimize_acqf
 from botorch.acquisition import UpperConfidenceBound
-from botorch.acquisition.objective import ScalarizedObjective
-import copy
 import csv
 import logging
-from typing import List, Dict, Any, Tuple
+from typing import List, Tuple
 import os
-# Imports from modularized files
-from .utility_functions import ota_two_fom_cal, get_indices_and_ranges, set_log_bounds, two_sort_and_group, seed_set
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from .utility_functions import ota_two_fom_cal, get_indices_and_ranges, two_sort_and_group
 from .mi_analysis import filter_two_rows
-
-# Parameter precision setting
-torch.set_default_dtype(torch.double)
+from constraint_utils import is_sim_failure, check_feasibility
 
 
 class BayesianOptimization():
@@ -65,9 +62,6 @@ class BayesianOptimization():
         self.GBW_num = 1
         self.phase_num = 1
 
-        # Bandgap flags removed for modularity of OTA2 focus
-        self.bandgap_flag = 0
-
     @staticmethod
     def y_revert(y_value: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -97,24 +91,17 @@ class BayesianOptimization():
         if self.fom_flag == 0:
             # Constrained Optimization Mode
 
-            # Check for simulation failures (NaN/Inf)
-            if torch.isnan(test_y).any() or torch.isinf(test_y).any() or test_y[:, 2] < 2:
+            if is_sim_failure(test_y):
                 self.logger.warning("Simulation result contains NaN/Inf or PM < 2, skipping point.")
                 return -2, 0
 
-                # Check if all constraints are met (Feasible Region)
-            if (test_y[:, 0] > thresholds['gain'] and
-                    test_y[:, 1] * thresholds['i_multiplier'] < thresholds['i'] and
-                    test_y[:, 2] > thresholds['phase'] and
-                    test_y[:, 3] > thresholds['gbw']):
+            if check_feasibility(test_y, thresholds):
 
-                # Check if it is better than existing data (lower current I)
                 is_better = test_y[0][1].item() < self.best_y
 
                 if is_better or self.mode.startswith('collect'):
 
                     if is_better:
-                        # NEW GLOBAL BEST FOUND
                         self.best_y = test_y[0][1].item()
                         new_best_list = test_y[0].tolist()
                         self.valid_x.append(new_x[0].tolist())
@@ -122,7 +109,6 @@ class BayesianOptimization():
                         self.last_valid_x = new_x[0].tolist()
                         self.last_valid_y = new_best_list
 
-                        # Stream write to CSV
                         if self.csv_writer and self.iter_counter is not None:
                             try:
                                 row_to_write = [self.iter_counter[0]] + new_best_list
@@ -131,28 +117,24 @@ class BayesianOptimization():
                             except Exception as e:
                                 self.logger.warning(f"CSV streaming write failed: {e}")
 
-                        next_flag = 0  # Reset stage termination counter
+                        next_flag = 0
                         self.logger.info(f"New best point (Current={self.best_y:.3e}) found.")
 
-                    # Feasible but not better (still accept point for GP training)
                     else:
                         self.valid_x.append(self.last_valid_x)
                         self.valid_y.append(self.last_valid_y)
                         next_flag = 1
 
-                    return 1, next_flag  # Feasible point found
+                    return 1, next_flag
 
-            # If constraints are not met (Infeasible Region)
             else:
-                # Inherit the previous best point for plotting/stability
                 if self.last_valid_x is not None:
                     self.valid_x.append(self.last_valid_x)
                     self.valid_y.append(self.last_valid_y)
 
                 next_flag = 1
-                return 0, next_flag  # Infeasible point found
+                return 0, next_flag
         else:
-            # Unconstrained FoM Mode (Maximization)
             is_better = test_y[0][0].item() > self.best_y
             if is_better:
                 self.best_y = test_y[0][0].item()
@@ -161,7 +143,7 @@ class BayesianOptimization():
                 next_flag = 0
             else:
                 next_flag = 1
-            return 1, next_flag  # Always return 1 since FoM is the optimization target
+            return 1, next_flag
 
     def judge_for_init(self, test_y: torch.Tensor, i: int, thresholds: dict) -> int:
         """
@@ -170,26 +152,14 @@ class BayesianOptimization():
 
         Returns: True (feasible and accepted), False (infeasible), -2 (sim failure/PM<2)
         """
-        # Check for simulation failures (NaN/Inf or PM < 2)
-        if torch.isnan(test_y).any() or torch.isinf(test_y).any():
-            self.logger.warning(f"Initial point {i + 1} simulation result contains NaN or Inf.")
-            return -2
-        if test_y[:, 2] < 2:
+        if is_sim_failure(test_y):
+            self.logger.warning(f"Initial point {i + 1} simulation failed (NaN/Inf or PM < 2).")
             return -2
 
         if self.fom_flag == 0:
-            # Constrained Optimization Mode
-
-            # Check if all constraints are met
-            if (test_y[:, 0] > thresholds['gain'] and
-                    test_y[:, 1] * thresholds['i_multiplier'] < thresholds['i'] and
-                    test_y[:, 2] > thresholds['phase'] and
-                    test_y[:, 3] > thresholds['gbw']):
-
-                # Check if it is better than existing data (lower current I)
+            if check_feasibility(test_y, thresholds):
                 is_better = test_y[0][1].item() < self.best_y
 
-                # Update data if better
                 if is_better:
                     self.best_y = test_y[0][1].item()
                     new_best_list = test_y[0].tolist()
@@ -198,7 +168,6 @@ class BayesianOptimization():
                     self.last_valid_x = torch.exp(self.dbx_alter[i]).tolist()
                     self.last_valid_y = new_best_list
 
-                    # Stream write to CSV
                     if self.csv_writer and self.iter_counter is not None:
                         try:
                             row_to_write = [self.iter_counter[0]] + new_best_list
@@ -207,21 +176,17 @@ class BayesianOptimization():
                         except Exception as e:
                             self.logger.warning(f"CSV streaming write failed: {e}")
 
-                # Inherit the previous best value if not better
                 else:
                     self.valid_x.append(self.last_valid_x)
                     self.valid_y.append(self.last_valid_y)
 
-                return True  # Point is feasible
+                return True
 
-            # If constraints are not met
             else:
-                # Inherit the previous best value for plotting/stability
                 self.valid_x.append(self.last_valid_x)
                 self.valid_y.append(self.last_valid_y)
-                return False  # Point is infeasible
+                return False
         else:
-            # Unconstrained FoM Mode
             is_better = test_y[0][0].item() > self.best_y
             if is_better:
                 self.best_y = test_y[0][0].item()
@@ -244,7 +209,7 @@ class BayesianOptimization():
     @staticmethod
     def load_model(gp: SingleTaskGP, mll: ExactMarginalLogLikelihood, filename: str):
         """Loads the GP model and MLL state dicts."""
-        checkpoint = torch.load(filename)
+        checkpoint = torch.load(filename, weights_only=True)
         gp.load_state_dict(checkpoint['model_state_dict'])
         gp.likelihood.load_state_dict(checkpoint['likelihood_state_dict'])
         mll.load_state_dict(checkpoint['mll_state_dict'])

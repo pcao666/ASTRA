@@ -2,9 +2,10 @@ import torch
 import numpy as np
 from sklearn.feature_selection import mutual_info_regression
 import logging
-
-# Parameter precision setting
-torch.set_default_dtype(torch.double)
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from constraint_utils import check_feasibility
+from config import CONSTRAINTS
 
 
 def calculate_mutual_information(X: np.ndarray, Y: np.ndarray, n_neighbors: int = 3, n_repeats: int = 10,
@@ -61,13 +62,7 @@ def filter_two_rows(y_log_space: torch.Tensor, logger=None) -> tuple:
     phase_num = 1
     gbw_num = 1
 
-    # Define hardcoded constraints for filtering (consistent with the original MI_calc.py)
-    # Target Constraints (Real Space)
-    target_gain = 60
-    target_current = 1e-3  # 1mA
-    current_multiplier = 1.8
-    target_phase = 60
-    target_gbw = 4e6
+    c = CONSTRAINTS
 
     # Create a detached copy for transformation
     y_alt = y_log_space.clone().detach()
@@ -79,29 +74,21 @@ def filter_two_rows(y_log_space: torch.Tensor, logger=None) -> tuple:
 
     # Iterate over rows for FoM calculation and counting
     for i, row in enumerate(y_alt):
-        # Check if constraints are satisfied
-        is_feasible = (row[0] > target_gain and
-                       row[1] * current_multiplier < target_current and
-                       row[2] > target_phase and
-                       row[3] > target_gbw)
+        row_tensor = row.unsqueeze(0)  # Shape (1, 4) for check_feasibility
+        feasible = check_feasibility(row_tensor)
 
-        if is_feasible:
-            # FoM value if constraints are met: 3 + f(Current) * weight
-            # This incentivizes lower current within the feasible region
-            modified_value = 3 + (target_current / row[1]) * 50
+        if feasible:
+            modified_value = 3.0 + (c['current_limit'] / row[1].item()) * 50.0
             FoM_num += 1
             modified_y.append(modified_value)
         else:
-            # FoM value if constraints are NOT met: 0 (This is a simplified approach
-            # used in the original code for early filtering/ranking)
-            modified_value = 0
-            modified_y.append(modified_value)
+            modified_y.append(0)
 
         # Count individual metric satisfaction
-        gain_num += (row[0] >= target_gain)
-        i_num += (row[1] * current_multiplier <= target_current)
-        phase_num += (row[2] >= target_phase)
-        gbw_num += (row[3] >= target_gbw)
+        gain_num += int(row[0].item() >= c['gain'])
+        i_num += int(row[1].item() * c['current_multiplier'] <= c['current_limit'])
+        phase_num += int(row[2].item() >= c['phase'])
+        gbw_num += int(row[3].item() >= c['gbw'])
 
     # Convert results to tensor
     modified_y = torch.tensor(modified_y, dtype=torch.double).unsqueeze(1)

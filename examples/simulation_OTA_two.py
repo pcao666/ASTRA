@@ -160,8 +160,7 @@ def OTA_two_simulation_gmid_pro(x, gmid1, gmid2, gmid3, gmid4, gmid5):
             frequency = data['ac1']['frequency']
 
             # DC current (Power proxy) - based on v0#branch current
-            # Note: The ' - 8e-5' seems specific to this circuit's bias current setting.
-            dc_current = np.abs(data['op1']['v0#branch']) - 8e-5
+            dc_current = np.abs(data['op1']['v0#branch'])
 
             voltage_abs = np.abs(voltage)
             voltage_pha = np.degrees(np.angle(voltage))
@@ -262,7 +261,7 @@ def OTA_two_simulation_all(x):
             frequency = data['ac1']['frequency']
 
             # DC current
-            dc_current = np.abs(data['op1']['v0#branch']) - 8e-5
+            dc_current = np.abs(data['op1']['v0#branch'])
             voltage_abs = np.abs(voltage)
             voltage_pha = np.degrees(np.angle(voltage))
 

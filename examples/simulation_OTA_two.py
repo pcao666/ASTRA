@@ -3,8 +3,10 @@ import os
 import sys
 import statistics
 
-# Ensure project root is on sys.path so config/lut_utils are importable
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Ensure project root and this file's directory are on sys.path
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)
 
 from ngspice_runner import NgSpice
 import numpy as np
@@ -26,7 +28,7 @@ _CURRENT_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Netlist file paths
 file_path_OTA_two_gmid_new = os.path.join(PATHS["netlist_dir"], "ICCAD_OTA_two_new.cir")
-file_path_OTA_two_all = os.path.join(PATHS["netlist_dir"], 're_OTA_two_all_netlist.cir')
+file_path_OTA_two_all = os.path.join(PATHS["netlist_dir"], 'ICCAD_OTA_two_new.cir')
 
 # GF180MCU nmos_3p3/pmos_3p3 max single-finger width
 _WMAX_PER_FINGER = 100e-6

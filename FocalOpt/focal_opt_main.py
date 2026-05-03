@@ -290,7 +290,7 @@ def run_focal_optimization(
 
         for i in range(len(dby_tensor_real)):
             row_y = dby_tensor_real[i]
-            if (row_y[0] > thresholds['gain'] and row_y[1] * thresholds['i_multiplier'] < thresholds['i'] and
+            if (row_y[0] > thresholds['gain'] and row_y[1] * thresholds['current_multiplier'] < thresholds['current_limit'] and
                     row_y[2] > thresholds['phase'] and row_y[3] > thresholds['gbw']):
 
                 valid_x_list.append(dbx_tensor_exp[i].tolist())

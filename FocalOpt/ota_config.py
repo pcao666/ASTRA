@@ -16,8 +16,8 @@ def init_OTA_two(logger=None):
 
     thresholds = {
         'gain': CONSTRAINTS['gain'],
-        'i_multiplier': CONSTRAINTS['current_multiplier'],
-        'i': CONSTRAINTS['current_limit'],
+        'current_multiplier': CONSTRAINTS['current_multiplier'],
+        'current_limit': CONSTRAINTS['current_limit'],
         'phase': CONSTRAINTS['phase'],
         'gbw': CONSTRAINTS['gbw'],
     }

@@ -62,7 +62,7 @@ PARAM_INITIAL = {
     "W5": 9e-6,
 }
 
-RANGE_FACTOR = 0.5  # ±50% around initial value
+RANGE_FACTOR = 0.2  # ±50% around initial value
 
 # ---------------------------------------------------------------------------
 # Circuit Topology — Bias Current Definitions

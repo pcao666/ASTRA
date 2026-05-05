@@ -31,7 +31,7 @@ if BASE_URL and not BASE_URL.endswith('/'):
 
 # NOTE: The provided .env suggests an OpenAI-compatible API endpoint, you may modify base on it.
 # We will use the V1 chat completion endpoint.
-LLM_API_URL = f"{BASE_URL}v1/chat/completions"
+LLM_API_URL = BASE_URL.rstrip("/") + "/chat/completions" if BASE_URL else None
 
 MAX_RETRIES = 5
 
@@ -144,7 +144,9 @@ def llm_ranking_actual(dbx: torch.Tensor, dby_real: List[List[float]], param_nam
 
             # --- 4. Parse Response and Format Output ---
             # Extract JSON from the content field
-            json_text = result['choices'][0]['message']['content']
+            # PATCH: GLM-4.7+/5.1 returns content in reasoning_content (NOT standard OpenAI 'content')
+            _msg = result['choices'][0]['message']
+            json_text = _msg.get('content') or _msg.get('reasoning_content') or ''
             llm_ranking_data = json.loads(json_text)
 
             # The JSON object should contain the 'ranking' array if the model followed the schema
@@ -312,6 +314,9 @@ def run_focal_optimization(
             last_valid_x = dbx_tensor_exp[-1].tolist()
             last_valid_y = dby_tensor_real[-1].tolist()
             best_y_current = last_valid_y[1]
+            # PATCH: seed valid lists with fallback so 'all_x' is non-empty in stage mode
+            valid_x_list.append(last_valid_x)
+            valid_y_list.append(last_valid_y)
 
         valid_x = valid_x_list
         valid_y = valid_y_list

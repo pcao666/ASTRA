@@ -437,6 +437,16 @@ class BayesianOptimization():
                                                                           dtype=torch.double)
 
                     # Update the corresponding row in dbx_alter and simulation input
+                    # PATCH: Guard against init retry overflowing pre-allocated tensor
+                    _target_idx = self.dby_alter.shape[0] + current_index
+                    if _target_idx >= self.dbx_alter.shape[0]:
+                        _extra = torch.zeros((_target_idx - self.dbx_alter.shape[0] + 1, self.dbx_alter.shape[1]), dtype=self.dbx_alter.dtype)
+                        self.dbx_alter = torch.cat([self.dbx_alter, _extra], dim=0)
+                    # PATCH: Guard against init retry overflowing pre-allocated tensor
+                    _target_idx = self.dby_alter.shape[0] + current_index
+                    if _target_idx >= self.dbx_alter.shape[0]:
+                        _extra = torch.zeros((_target_idx - self.dbx_alter.shape[0] + 1, self.dbx_alter.shape[1]), dtype=self.dbx_alter.dtype)
+                        self.dbx_alter = torch.cat([self.dbx_alter, _extra], dim=0)
                     self.dbx_alter[self.dby_alter.shape[0] + current_index] = new_x_values_log[current_index]
                     new_x_values_sim[current_index] = torch.exp(new_x_values_log[current_index])
                     continue

@@ -7,7 +7,7 @@
 V0 vdd 0 DC 3.3
 
 * BIAS: 20uA ref
-Ibias vdd vbn DC 20u
+Ibias vdd vbn DC 50u
 XMbn vbn vbn 0 0 nmos_3p3 w=w5 nf=nf5 l=l5
 
 * STAGE 1

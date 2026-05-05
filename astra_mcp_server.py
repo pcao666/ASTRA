@@ -54,7 +54,24 @@ def get_db_collection():
 @mcp.tool()
 async def rag_query(query: str, num_results: int = 3) -> Dict[str, Any]:
     """
-    Queries the document knowledge base and returns the most relevant results.
+    Queries the analog circuit design knowledge base. The knowledge base contains:
+    - gm/Id design tables and methodology for analog OTA sizing
+    - Compensation network design rules (Miller, Ahuja, etc.)
+    - Layout-aware design considerations and parasitic effects
+    - PVT corner analysis methodology
+
+    Call this tool BEFORE making sizing decisions when you need:
+    - Recommended gm/Id values for specific transistor roles (input pair, current mirror, etc.)
+    - Heuristics for choosing initial L/W ranges
+    - Compensation strategy selection guidance
+    - Knowledge of process-specific design constraints
+
+    Args:
+        query: Natural language question about analog circuit design
+        num_results: Number of relevant document chunks to return (default 3)
+
+    Returns:
+        Dict with 'results' list, each containing 'content' (document text)
     """
     global _rag_model  # Declare that we are using the global variable
 
@@ -331,7 +348,7 @@ async def find_initial_design(
     Returns:
         A dictionary containing the task ID and status information.
     """
-    task_id = f"design_{int(time.time())}"
+    task_id = f"{int(time.time())}"
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     output_filename = f"find_design_results_{timestamp}_{task_id}.log"
 

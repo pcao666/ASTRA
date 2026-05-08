@@ -1,19 +1,85 @@
 import os
 import chromadb
 import pdfplumber
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer  # Fallback: bge-m3 本地模型
 import time
-from tqdm import tqdm  # Import tqdm for progress bars
-import sys  # <-- Added this import to fix the NameError
-import io  # <-- Added this import as it's used at the bottom
+from tqdm import tqdm
+import sys
+import io
+import requests
 
 # --- Configuration ---
 DB_PATH = "./database"  # Your Database data path
 COLLECTION_NAME = "my_collection"
-MODEL_NAME = 'BAAI/bge-m3'
+LOCAL_EMBEDDING_MODEL = 'BAAI/bge-m3'
+LOCAL_ENCODING_BATCH_SIZE = 32
 CHUNK_SIZE = 500   # Adjust based on real case
-ENCODING_BATCH_SIZE = 32  # Adjust based on your GPU/CPU memory
+EMBEDDING_API_BATCH_SIZE = 32
 UPLOAD_BATCH_SIZE = 500  # Adjust based on your system's memory
+
+# --- SiliconFlow Embedding API Config ---
+SILICONFLOW_API_URL = "https://api.siliconflow.cn/v1/embeddings"
+SILICONFLOW_EMBEDDING_MODEL = os.getenv("SILICONFLOW_EMBEDDING_MODEL", "Qwen/Qwen3-VL-Embedding-8B")
+MAX_RETRIES = 3
+
+
+# ==============================================================================
+# SiliconFlow Embedding API
+# ==============================================================================
+
+def _siliconflow_headers():
+    from dotenv import load_dotenv
+    load_dotenv()
+    api_key = os.getenv("SILICONFLOW_API_KEY", "")
+    if not api_key:
+        return None
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+
+def get_embeddings_via_api(texts, model=None, batch_size=EMBEDDING_API_BATCH_SIZE):
+    """
+    调用 SiliconFlow Embedding API 将文本列表转为向量。
+    单次最多 batch_size 条输入，超出自动分批。
+    返回与 texts 等长的向量列表。
+    """
+    if model is None:
+        model = os.getenv("SILICONFLOW_EMBEDDING_MODEL", SILICONFLOW_EMBEDDING_MODEL)
+
+    headers = _siliconflow_headers()
+    all_embeddings = []
+
+    for i in tqdm(range(0, len(texts), batch_size), desc="Generating Embeddings (SiliconFlow)"):
+        batch = texts[i:i + batch_size]
+        payload = {
+            "model": model,
+            "input": batch,
+            "encoding_format": "float",
+        }
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                resp = requests.post(SILICONFLOW_API_URL, headers=headers, json=payload, timeout=60)
+                result = resp.json()
+                break
+            except requests.exceptions.RequestException as e:
+                if attempt < MAX_RETRIES - 1:
+                    print(f"\n  Embedding API request failed, retry {attempt + 1}/{MAX_RETRIES}: {e}")
+                    time.sleep(2 * (attempt + 1))
+                else:
+                    raise RuntimeError(f"Embedding API request failed ({MAX_RETRIES} retries): {e}")
+
+        if resp.status_code != 200 or "data" not in result:
+            raise RuntimeError(f"SiliconFlow Embedding API error: HTTP {resp.status_code}, {result}")
+
+        sorted_data = sorted(result["data"], key=lambda x: x["index"])
+        for item in sorted_data:
+            all_embeddings.append(item["embedding"])
+
+    print(f"Embedding generation complete. Total vectors: {len(all_embeddings)}")
+    return all_embeddings
 
 
 # --- Text Extraction Functions ---
@@ -114,35 +180,44 @@ def build_database():
 
     print(f"\n✅ Total text chunks created: {len(all_text_chunks)}")
 
-    # 4. Load Embedding Model
-    print(f"\nLoading embedding model: {MODEL_NAME} (this may take a moment)...")
-    start_time = time.time()
-    model = SentenceTransformer(MODEL_NAME)
-    print(f"Model loaded in {time.time() - start_time:.2f} seconds.")
+    # 4. Generate Embeddings: SiliconFlow API 优先，失败 fallback 本地 bge-m3
+    all_embeddings = None
+    try:
+        headers = _siliconflow_headers()
+        if headers is not None:
+            print(f"\nGenerating embeddings via SiliconFlow API (model: {SILICONFLOW_EMBEDDING_MODEL})...")
+            all_embeddings = get_embeddings_via_api(all_text_chunks)
+        else:
+            print("SILICONFLOW_API_KEY not set, using local model.")
+    except Exception as e:
+        print(f"SiliconFlow API failed ({e}), falling back to local model.")
 
-    # 5. Generate Embeddings with Progress Bar
-    print("\nGenerating embeddings for all text chunks...")
-    all_embeddings = []
+    if all_embeddings is None:
+        print(f"\nLoading local embedding model: {LOCAL_EMBEDDING_MODEL}...")
+        start_time = time.time()
+        model = SentenceTransformer(LOCAL_EMBEDDING_MODEL)
+        print(f"Model loaded in {time.time() - start_time:.2f} seconds.")
 
-    # Process in batches with tqdm
-    for i in tqdm(range(0, len(all_text_chunks), ENCODING_BATCH_SIZE), desc="Generating Embeddings"):
-        batch_chunks = all_text_chunks[i:i + ENCODING_BATCH_SIZE]
-        # Set show_progress_bar=False to avoid nested progress bars
-        batch_embeddings = model.encode(batch_chunks, normalize_embeddings=True, show_progress_bar=False)
-        all_embeddings.extend(batch_embeddings)
+        print("Generating embeddings for all text chunks...")
+        all_embeddings = []
+        for i in tqdm(range(0, len(all_text_chunks), LOCAL_ENCODING_BATCH_SIZE), desc="Generating Embeddings"):
+            batch_chunks = all_text_chunks[i:i + LOCAL_ENCODING_BATCH_SIZE]
+            batch_embeddings = model.encode(batch_chunks, normalize_embeddings=True, show_progress_bar=False)
+            all_embeddings.extend(batch_embeddings)
+        print(f"Embedding generation complete. Total vectors: {len(all_embeddings)}")
 
-    print(f"✅ Embedding generation complete. Total vectors: {len(all_embeddings)}")
-
-    # 6. Upload data to ChromaDB in batches with Progress Bar
+    # 5. Upload data to ChromaDB in batches with Progress Bar
     print("\nUploading documents and embeddings to ChromaDB...")
 
-    # Process in batches with tqdm
     for i in tqdm(range(0, len(all_text_chunks), UPLOAD_BATCH_SIZE), desc="Uploading to ChromaDB"):
+        batch_embeddings = all_embeddings[i:i + UPLOAD_BATCH_SIZE]
+        # API 返回 list，本地模型返回 ndarray — 统一为 list
+        if batch_embeddings and hasattr(batch_embeddings[0], 'tolist'):
+            batch_embeddings = [e.tolist() for e in batch_embeddings]
         collection.upsert(
             documents=all_text_chunks[i:i + UPLOAD_BATCH_SIZE],
             ids=all_document_ids[i:i + UPLOAD_BATCH_SIZE],
-            # Ensure embeddings are in the correct list format
-            embeddings=[e.tolist() for e in all_embeddings[i:i + UPLOAD_BATCH_SIZE]]
+            embeddings=batch_embeddings
         )
 
     print("\n--- ✅ Database Build Complete! ---")

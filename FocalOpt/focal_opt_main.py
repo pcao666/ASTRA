@@ -226,7 +226,7 @@ def run_focal_optimization(
     """
     Orchestrates the multi-stage Focal Optimization process (ASTRA-FocalOpt Stage 2-4).
 
-    Returns: (output_file_path: str, final_best_result: List[float])
+    Returns: (output_file_path: str, final_best_result: List[float], final_best_x: List[float])
     """
 
     logger.info("--- FocalOpt (Stage 2) Optimization Task Started ---")
@@ -577,7 +577,8 @@ def run_focal_optimization(
 
         # Return the final best result found
         final_best = last_y
-        return file_path, final_best
+        final_best_x = last_x
+        return file_path, final_best, final_best_x
 
 
     except Exception as e:

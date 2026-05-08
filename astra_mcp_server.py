@@ -1,6 +1,6 @@
 import os
 import chromadb
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer  # Fallback: bge-m3 本地模型
 from typing import List, Dict, Any, Tuple
 import sys
 from mcp.server.fastmcp import FastMCP
@@ -13,6 +13,7 @@ import logging
 from multiprocessing import Process
 import concurrent.futures
 import threading
+import requests
 
 mcp = FastMCP("LOCAL", timeout=6000, request_timeout=6000, execution_timeout=6000)
 
@@ -20,13 +21,17 @@ mcp = FastMCP("LOCAL", timeout=6000, request_timeout=6000, execution_timeout=600
 db_path = "./database"  # Your Database data path
 collection_name = "my_collection"
 
-# --- Model & DB (Lazy Loading) ---
-# We load the model AND database "lazily" (on first use) inside the tool
-# to prevent blocking the server startup (which causes handshake issues).
-_rag_model = None
+# --- Embedding Config ---
+# SiliconFlow API 优先，失败则 fallback 到本地 bge-m3
+SILICONFLOW_API_URL = "https://api.siliconflow.cn/v1/embeddings"
+SILICONFLOW_EMBEDDING_MODEL = os.getenv("SILICONFLOW_EMBEDDING_MODEL", "Qwen/Qwen3-VL-Embedding-8B")
+LOCAL_EMBEDDING_MODEL = "BAAI/bge-m3"
+
+# --- Lazy Loading ---
+_rag_model = None  # 本地 bge-m3 model (仅 fallback 时加载)
 _chroma_client = None
 _collection = None
-print("ChromaDB client and RAG model (BAAI/bge-m3) will be loaded on first use.")
+print("ChromaDB client will be loaded on first use. Embeddings: SiliconFlow API (priority) -> local bge-m3 (fallback).")
 
 
 def get_db_collection():
@@ -73,34 +78,61 @@ async def rag_query(query: str, num_results: int = 3) -> Dict[str, Any]:
     Returns:
         Dict with 'results' list, each containing 'content' (document text)
     """
-    global _rag_model  # Declare that we are using the global variable
-
     try:
-        # 1. Get DB connection (lazy loaded)
         collection = get_db_collection()
     except Exception as e:
         return {"results": [{"content": f"Error: Could not connect to DB. {e}"}]}
 
-    # 2. Load the model only on the first call
-    if _rag_model is None:
-        print("Loading RAG query model (BAAI/bge-m3) for the first time...")
-        try:
-            _rag_model = SentenceTransformer('BAAI/bge-m3')
-            print("✅ RAG model loaded.")
-        except Exception as e:
-            print(f"❌ CRITICAL ERROR: Could not load SentenceTransformer model.")
-            print(f"Details: {e}")
-            return {"results": [{"content": f"Error: Could not load RAG model. {e}"}]}
-
     print(f"Received query: {query}")
 
-    # Use the pre-loaded model, which is much faster
-    query_embedding = _rag_model.encode([query], normalize_embeddings=True)[0]
+    # --- Embedding: SiliconFlow API 优先，失败 fallback 本地 bge-m3 ---
+    query_embedding = None
 
-    # Query using the embedding vector
+    # 1) Try SiliconFlow API
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        api_key = os.getenv("SILICONFLOW_API_KEY", "")
+        if api_key:
+            resp = requests.post(
+                SILICONFLOW_API_URL,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                json={
+                    "model": SILICONFLOW_EMBEDDING_MODEL,
+                    "input": [query],
+                    "encoding_format": "float",
+                },
+                timeout=30,
+            )
+            result = resp.json()
+            if "data" in result and len(result["data"]) > 0:
+                query_embedding = result["data"][0]["embedding"]
+                print("Embedding via SiliconFlow API (Qwen3-VL-Embedding-8B).")
+            else:
+                print(f"SiliconFlow API returned no data, falling back to local model.")
+        else:
+            print("SILICONFLOW_API_KEY not set, falling back to local model.")
+    except Exception as e:
+        print(f"SiliconFlow API failed ({e}), falling back to local model.")
+
+    # 2) Fallback: local bge-m3
+    if query_embedding is None:
+        global _rag_model
+        if _rag_model is None:
+            print(f"Loading local embedding model ({LOCAL_EMBEDDING_MODEL})...")
+            try:
+                _rag_model = SentenceTransformer(LOCAL_EMBEDDING_MODEL)
+                print("Local model loaded.")
+            except Exception as e:
+                return {"results": [{"content": f"Error: Could not load local embedding model. {e}"}]}
+        query_embedding = _rag_model.encode([query], normalize_embeddings=True)[0].tolist()
+        print("Embedding via local bge-m3 (fallback).")
+
     results = collection.query(
-        # Ensure embedding is a list for the query
-        query_embeddings=[query_embedding.tolist()],
+        query_embeddings=[query_embedding],
         n_results=num_results
     )
 
@@ -232,7 +264,7 @@ def _run_focal_opt_task(
     """
     # --- LAZY IMPORT ---
     # Import simulation functions only when the task runs
-    from examples.simulation_OTA_two import OTA_two_simulation_all
+    from examples.simulation_OTA_two import OTA_two_simulation_all, write_data_OTA_two_all
 
     logger = logging.getLogger(task_id)
     logger.setLevel(logging.INFO)
@@ -277,7 +309,7 @@ def _run_focal_opt_task(
             logger.info(f"FocalOpt optimization start time: {time.ctime(start_time)}")
 
             # Main FocalOpt call
-            final_csv_path, final_best_result = run_focal_optimization(
+            final_csv_path, final_best_result, final_best_x = run_focal_optimization(
                 initial_x_csv_path,
                 initial_y_csv_path,
                 OTA_two_simulation_all,  # Pass the full unbinding simulation function
@@ -293,6 +325,35 @@ def _run_focal_opt_task(
             logger.info(f"Total elapsed time: {elapsed_time:.2f} seconds")
             logger.info(f"Final results saved in: {os.path.abspath(final_csv_path)}")
             logger.info(f"Best performance metrics: {final_best_result}")
+            logger.info(f"Best X parameters: {final_best_x}")
+
+            # --- Generate final netlist from best parameters ---
+            if final_best_x and len(final_best_x) == 12:
+                param_names = ['cap', 'L1', 'L2', 'L3', 'L4', 'L5', 'r', 'W1', 'W2', 'W3', 'W4', 'W5']
+                x_dict = dict(zip(param_names, final_best_x))
+
+                netlist_template = os.path.join("examples", "netlists", "ICCAD_OTA_two_new.cir")
+                netlist_output = os.path.join("netlist_working", f"focalopt_{task_id}_final.cir")
+                os.makedirs("netlist_working", exist_ok=True)
+
+                write_data_OTA_two_all(
+                    netlist_template,
+                    cap=x_dict['cap'], l1=x_dict['L1'], l2=x_dict['L2'],
+                    l3=x_dict['L3'], l4=x_dict['L4'], l5=x_dict['L5'],
+                    r=x_dict['r'], w1=x_dict['W1'], w2=x_dict['W2'],
+                    w3=x_dict['W3'], w4=x_dict['W4'], w5=x_dict['W5']
+                )
+
+                # write_data_OTA_two_all writes to a fixed temp path; copy to our output path
+                import shutil
+                temp_netlist = os.path.join("examples", "temp_retest_OTA_two_all_netlist_new.cir")
+                if os.path.exists(temp_netlist):
+                    shutil.copy2(temp_netlist, netlist_output)
+                    logger.info(f"Final netlist saved to: {os.path.abspath(netlist_output)}")
+                else:
+                    logger.warning("Temp netlist not found after write_data_OTA_two_all call.")
+            else:
+                logger.warning(f"Could not generate netlist: final_best_x invalid (len={len(final_best_x) if final_best_x else 0})")
 
 
         except Exception as e:

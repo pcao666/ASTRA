@@ -15,7 +15,7 @@ import concurrent.futures
 import threading
 import requests
 
-mcp = FastMCP("LOCAL", timeout=6000, request_timeout=6000, execution_timeout=6000)
+mcp = FastMCP("LOCAL")
 
 # --- Database Connection (Assumes DB is already built) ---
 db_path = "./database"  # Your Database data path
@@ -153,356 +153,710 @@ async def rag_query(query: str, num_results: int = 3) -> Dict[str, Any]:
     return response
 
 
+# =============================================================================
+#  Vibe Coding Sizing Tools  (v0.2 architecture — see SIZING_FLOW.md)
+# =============================================================================
+#  Replaces the legacy `find_initial_design` (Stage 1 BO) and `FocalOpt` (Stage 2)
+#  with fine-grained, agent-friendly primitives.
+#
+#  Design rule: tools return DATA (dicts/lists), never pre-formatted text.
+#  Claude Code composes presentation from the data shape.
+# =============================================================================
+
+import json
+from pathlib import Path
+from datetime import datetime
+
+# Local module: master LUT engine for GF180MCU 3.3V.
+from lut_utils_v2 import LUT, PROCESS_LIMITS
+
+# Lazy-load the LUT (instantiated on first call, cached for server lifetime).
+_LUT_INSTANCE = None
+def _get_lut() -> LUT:
+    global _LUT_INSTANCE
+    if _LUT_INSTANCE is None:
+        _LUT_INSTANCE = LUT.load_default()
+        print(f"✅ Master LUT loaded: NMOS + PMOS, GF180MCU 3.3V")
+    return _LUT_INSTANCE
 
 
-
-# --- find_initial_design Background Task ---
-
-def _run_find_initial_design_task(
-        gmid1: int,
-        gmid2: int,
-        gmid3: int,
-        gmid4: int,
-        gmid5: int,
-        iterations: int,
-        task_id: str,
-        output_filename: str  # .log file path
-):
+# -----------------------------------------------------------------------------
+# Tool 4: lookup_L_from_intrinsic_gain
+# -----------------------------------------------------------------------------
+@mcp.tool()
+async def lookup_L_from_intrinsic_gain(
+        type: str,
+        target_gm_over_gds: float,
+        K: float = 2.0,
+        V_star_eval: float = 0.20,
+) -> Dict[str, Any]:
     """
-    A standalone function to execute the find_initial_design task in the background.
-    This function will run in a new process and includes detailed debugging logs.
+    Step 4 of the gm/Id flow: given a required intrinsic gain (gm/gds, also
+    written gm·ro) and a saturation factor K = Vds/V*, return all L candidates
+    in the LUT sweep with their achievable gain and a PVT margin assessment.
+
+    Use this BEFORE picking W. Call once per device class (input pair, mirror,
+    cascode) when you need to decide L based on a gain budget.
+
+    Args:
+        type: "nmos" or "pmos"
+        target_gm_over_gds: required intrinsic gain per device (e.g. 200 for
+            cascoded stages targeting 80+ dB)
+        K: Vds/V* — default 2.0 (the standard saturation-margin assumption).
+            Set higher (e.g. 4-5) if you have extra Vds headroom in the topology.
+        V_star_eval: V* at which to evaluate the L-vs-gain curve. Default 0.20V
+            (PDF FoM-peak). Use 0.15 for high-gm input pairs, 0.25 for mirrors.
+
+    Returns:
+        Dict with:
+            - target_gm_over_gds: echo of input
+            - K_eval, V_star_eval, Vds_eval: evaluation point
+            - all_candidates: list of {L, gm_over_gds_at_K, ft_at_K,
+                area_proxy, pvt_margin_flag, notes} — every L in the sweep
+            - candidates_meeting_target: subset that satisfies the gain target
+            - notes: warnings if target is unachievable on this process
     """
-    logger = logging.getLogger(task_id)
-    logger.setLevel(logging.INFO)
-    # Prevent duplicate handlers due to retries
-    if logger.hasHandlers():
-        logger.handlers.clear()
-
-    file_handler = logging.FileHandler(output_filename, encoding='utf-8')
-    file_handler.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-
+    if type not in ("nmos", "pmos"):
+        return {"error": f"type must be 'nmos' or 'pmos', got '{type}'"}
     try:
-        # Lazy loading to prevent long startup time
-        from Find_Initial_Design.bo_logic import BayesianOptimization
-
-        logger.info(f"--- Background Task 'find_initial_design' Started: {time.ctime()} ---")
-        logger.info(f"Task ID: {task_id}")
-        logger.info(f"GMID Parameters: gmid1={gmid1}, gmid2={gmid2}, gmid3={gmid3}, gmid4={gmid4}, gmid5={gmid5}")
-        logger.info(f"Max optimization iterations: {iterations} (plus 10 initial samples)")
-        logger.info("\n")
-
-        try:
-            SEED = 5
-            logger.info(f"Using Seed set to: {SEED}")
-
-            store_path = "./store"
-            os.makedirs(store_path, exist_ok=True)
-            file_path_x = os.path.join(store_path, f"design_{task_id}_SEED_{SEED}_x.csv")
-            file_path_y = os.path.join(store_path, f"design_{task_id}_SEED_{SEED}_y.csv")
-
-            logger.info(f"Result X will be saved to: {os.path.abspath(file_path_x)}")
-            logger.info(f"Result Y will be saved to: {os.path.abspath(file_path_y)}")
-
-            mace = BayesianOptimization(iterations)
-
-            start_time = time.time()
-            logger.info(f"Optimization start time: {time.ctime(start_time)}")
-
-            # Execute find, passing the logger
-            resultx, resulty = mace.find(
-                gmid1, gmid2, gmid3, gmid4, gmid5,
-                file_path_x, file_path_y,
-                logger
-            )
-
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-            logger.info(f"\n--- Optimization Complete ---")
-            logger.info(f"Optimization end time: {time.ctime(end_time)}")
-            logger.info(f"Total elapsed time: {elapsed_time:.2f} seconds")
-
-            # Print final results to log
-            mace.print_results(resultx, resulty, logger)
-
-            logger.info(f"Streaming CSV files saved.")
-
-        except Exception as e:
-            logger.error(f"\n--- Task 'find_initial_design' Terminated Unexpectedly: {time.ctime()} ---")
-            logger.error("A fatal error caused the process to crash. Full traceback:")
-            logger.error(traceback.format_exc())
-
+        lut = _get_lut()
+        return lut.lookup_L_from_intrinsic_gain(
+            type=type,
+            target_gain=target_gm_over_gds,
+            K=K,
+            V_star_for_eval=V_star_eval,
+        )
     except Exception as e:
-        error_msg = f"Could not set up log file '{output_filename}' or failed to import 'bo_logic', 'find_initial_design' task aborted. Error: {e}"
-        print(error_msg)
-        try:
-            # Try a final log write
-            logger.error(error_msg)
-            logger.error(traceback.format_exc())
-        except:
-            pass
-
-    print(f"Background task 'find_initial_design' finished, logs written to: {os.path.abspath(output_filename)}")
-    # Close logger handlers
-    file_handler.close()
-    logger.removeHandler(file_handler)
+        return {"error": f"LUT query failed: {e}", "traceback": traceback.format_exc()}
 
 
-# --- FocalOpt Background Task ---
-
-def _run_focal_opt_task(
-        initial_design_task_id: str,
-        iterations: int,
-        task_id: str,
-        output_filename: str  # .log file path
-):
+# -----------------------------------------------------------------------------
+# Tool 5: lookup_W_from_current
+# -----------------------------------------------------------------------------
+@mcp.tool()
+async def lookup_W_from_current(
+        type: str,
+        L: float,
+        Id: float,
+        V_star: float,
+        Vds: float = None,
+) -> Dict[str, Any]:
     """
-    A standalone function to execute the FocalOpt (Stage 2 optimization) task in the background.
-    This function will run in a new process and includes detailed debugging logs.
+    Step 6 of the gm/Id flow: given L (chosen via lookup_L_from_intrinsic_gain
+    or by other means), the per-device drain current Id, and a target V* (which
+    is equivalent to gm/Id = 2/V*), compute the device width W from the LUT's
+    I* curve, plus the full implied operating point.
+
+    Call this AFTER L is picked. Use the returned W as the initial-design sizing.
+
+    Args:
+        type: "nmos" or "pmos"
+        L: channel length in meters (e.g. 0.7e-6)
+        Id: per-device drain current in amperes (e.g. 10e-6)
+        V_star: overdrive proxy = 2·Id/gm, in volts. Typical values:
+            - 0.15-0.20V for input pairs / high-gm devices
+            - 0.25V for current mirrors (mismatch margin)
+            - 0.10V for very low-power / sub-threshold designs
+        Vds: device drain-source voltage. If None, defaults to 2·V* (K=2
+            saturation margin convention).
+
+    Returns:
+        Dict with W (and W_um for human-readable), Id, gm (back-computed),
+        ft, gm/Id, gm/gds at this op-point, vth, vdsat, in_saturation flag,
+        in_lut_range flag, and notes (e.g. W < W_min warning).
     """
-    # --- LAZY IMPORT ---
-    # Import simulation functions only when the task runs
-    from examples.simulation_OTA_two import OTA_two_simulation_all, write_data_OTA_two_all
-
-    logger = logging.getLogger(task_id)
-    logger.setLevel(logging.INFO)
-    if logger.hasHandlers():
-        logger.handlers.clear()
-
-    file_handler = logging.FileHandler(output_filename, encoding='utf-8')
-    file_handler.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-
+    if type not in ("nmos", "pmos"):
+        return {"error": f"type must be 'nmos' or 'pmos', got '{type}'"}
     try:
-        # Lazy load FocalOpt logic
-        from FocalOpt.focal_opt_main import run_focal_optimization
+        lut = _get_lut()
+        return lut.lookup_W_from_current(type=type, L=L, Id=Id,
+                                         V_star=V_star, Vds=Vds)
+    except Exception as e:
+        return {"error": f"LUT query failed: {e}", "traceback": traceback.format_exc()}
 
-        logger.info(f"--- Background Task 'FocalOpt' (Stage 2 Optimization) Started: {time.ctime()} ---")
-        logger.info(f"Task ID: {task_id}")
-        logger.info(f"Using Initial Design ID: {initial_design_task_id}")
-        logger.info(f"Max optimization iterations: {iterations} (will be distributed within FocalOpt stages)")
-        logger.info("\n")
 
-        try:
-            SEED = 5  # Assume FocalOpt internally uses SEED 5
+# -----------------------------------------------------------------------------
+# Tool 6: query_op_point
+# -----------------------------------------------------------------------------
+@mcp.tool()
+async def query_op_point(
+        type: str,
+        L: float,
+        V_star: float,
+        Vds: float = None,
+) -> Dict[str, Any]:
+    """
+    General-purpose operating-point readout from the LUT. Use this for
+    what-if exploration, sanity-checking a proposed design, or computing
+    derived quantities without committing to a specific W or Id.
 
-            store_path = "./store"
-            os.makedirs(store_path, exist_ok=True)
+    Returns the full BSIM4 small-signal readout at (L, V*, Vds): vth, vdsat,
+    I*=id/W, gm/Id, gm/gds, ft, K=Vds/V*, plus saturation + range flags.
 
-            # Construct file paths for the Stage 1 output
-            initial_x_csv_path = os.path.join(store_path, f"design_{initial_design_task_id}_SEED_{SEED}_x.csv")
-            initial_y_csv_path = os.path.join(store_path, f"design_{initial_design_task_id}_SEED_{SEED}_y.csv")
+    Use cases:
+      - "What ft can I get at L=1u, V*=0.2, Vds=1.65?"
+      - "Is L=0.3u, V*=0.1 still in saturation at Vds=0.5?"
+      - "What's the intrinsic gain of a PMOS at L=2u, V*=0.25?"
 
-            if not os.path.exists(initial_y_csv_path):
-                logger.error(f"FATAL: Initial design Y CSV file not found: {initial_y_csv_path}")
-                raise FileNotFoundError(f"Initial design file not found: {initial_y_csv_path}")
+    Args:
+        type: "nmos" or "pmos"
+        L: channel length in meters
+        V_star: 2·Id/gm in volts
+        Vds: drain-source voltage. Defaults to 2·V* if None.
 
-            if not os.path.exists(initial_x_csv_path):
-                logger.error(f"FATAL: Initial design X CSV file not found: {initial_x_csv_path}")
-                raise FileNotFoundError(f"Initial design file not found: {initial_x_csv_path}")
+    Returns:
+        Dict with all op-point quantities and physical sanity flags.
+    """
+    if type not in ("nmos", "pmos"):
+        return {"error": f"type must be 'nmos' or 'pmos', got '{type}'"}
+    try:
+        lut = _get_lut()
+        return lut.query_op_point(type=type, L=L, V_star=V_star, Vds=Vds)
+    except Exception as e:
+        return {"error": f"LUT query failed: {e}", "traceback": traceback.format_exc()}
 
-            start_time = time.time()
-            logger.info(f"FocalOpt optimization start time: {time.ctime(start_time)}")
 
-            # Main FocalOpt call
-            final_csv_path, final_best_result, final_best_x = run_focal_optimization(
-                initial_x_csv_path,
-                initial_y_csv_path,
-                OTA_two_simulation_all,  # Pass the full unbinding simulation function
-                task_id,
-                logger,
-                total_iterations=iterations
-            )
+# -----------------------------------------------------------------------------
+# Tool 1: parse_yaml_spec
+# -----------------------------------------------------------------------------
+@mcp.tool()
+async def parse_yaml_spec(path: str) -> Dict[str, Any]:
+    """
+    Parse an AutoSizer-format YAML spec file describing a circuit sizing task.
+    Returns the parsed dict, with light normalization (unit parsing for
+    "10MHz" → 10e6, "2pF" → 2e-12, etc.) so downstream tools can consume it.
 
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-            logger.info(f"\n--- FocalOpt Optimization Complete ---")
-            logger.info(f"Optimization end time: {time.ctime(end_time)}")
-            logger.info(f"Total elapsed time: {elapsed_time:.2f} seconds")
-            logger.info(f"Final results saved in: {os.path.abspath(final_csv_path)}")
-            logger.info(f"Best performance metrics: {final_best_result}")
-            logger.info(f"Best X parameters: {final_best_x}")
+    The YAML schema (AutoSizer convention):
+        circuit: <name>
+        process: <pdk_id>
+        vdd: <volts>
+        specs:
+          GBW: <value with unit>
+          CL: <value with unit>
+          DC_gain: ">= N dB"
+          ...
+        constraints:
+          L_min: <value>
+          L_max: <value>
 
-            # --- Generate final netlist from best parameters ---
-            if final_best_x and len(final_best_x) == 12:
-                param_names = ['cap', 'L1', 'L2', 'L3', 'L4', 'L5', 'r', 'W1', 'W2', 'W3', 'W4', 'W5']
-                x_dict = dict(zip(param_names, final_best_x))
+    Args:
+        path: filesystem path to the .yaml spec file
 
-                netlist_template = os.path.join("examples", "netlists", "ICCAD_OTA_two_new.cir")
-                netlist_output = os.path.join("netlist_working", f"focalopt_{task_id}_final.cir")
-                os.makedirs("netlist_working", exist_ok=True)
+    Returns:
+        Dict with parsed spec, normalized to SI units. Includes a 'raw' field
+        with the original text for traceability.
+    """
+    try:
+        import yaml
+    except ImportError:
+        return {"error": "PyYAML not installed; run `pip install pyyaml`"}
+    try:
+        with open(path, "r") as f:
+            raw = f.read()
+        parsed = yaml.safe_load(raw)
+    except Exception as e:
+        return {"error": f"could not read/parse YAML: {e}", "path": path}
 
-                write_data_OTA_two_all(
-                    netlist_template,
-                    cap=x_dict['cap'], l1=x_dict['L1'], l2=x_dict['L2'],
-                    l3=x_dict['L3'], l4=x_dict['L4'], l5=x_dict['L5'],
-                    r=x_dict['r'], w1=x_dict['W1'], w2=x_dict['W2'],
-                    w3=x_dict['W3'], w4=x_dict['W4'], w5=x_dict['W5']
-                )
+    # Light unit normalization on the specs block
+    UNIT_MULT = {
+        "f": 1e-15, "p": 1e-12, "n": 1e-9, "u": 1e-6, "m": 1e-3,
+        "k": 1e3,   "M": 1e6,   "G": 1e9,
+    }
+    def _norm(val):
+        if isinstance(val, str):
+            v = val.strip()
+            # Strip common units (Hz, F, V, A, dB, W, °) and return numeric multiplier
+            # Strip compound units first (longest match wins), then single units
+            for suffix in ("V/us", "V/s", "Hz", "dB", "F", "V", "A", "s", "W"):
+                if v.endswith(suffix):
+                    v = v[:-len(suffix)]
+                    # special compound: V/us is slew rate, base unit is V/s,
+                    # so the SI value is the numeric × 1e6
+                    if suffix == "V/us":
+                        try:
+                            return float(v) * 1e6
+                        except ValueError:
+                            return val
+                    break
+            # SI prefix
+            if v and v[-1] in UNIT_MULT:
+                try:
+                    return float(v[:-1]) * UNIT_MULT[v[-1]]
+                except ValueError:
+                    return val
+            try:
+                return float(v)
+            except ValueError:
+                return val
+        return val
 
-                # write_data_OTA_two_all writes to a fixed temp path; copy to our output path
-                import shutil
-                temp_netlist = os.path.join("examples", "temp_retest_OTA_two_all_netlist_new.cir")
-                if os.path.exists(temp_netlist):
-                    shutil.copy2(temp_netlist, netlist_output)
-                    logger.info(f"Final netlist saved to: {os.path.abspath(netlist_output)}")
-                else:
-                    logger.warning("Temp netlist not found after write_data_OTA_two_all call.")
+    if isinstance(parsed, dict) and "specs" in parsed:
+        for k, v in list(parsed["specs"].items()):
+            parsed["specs"][k] = _norm(v)
+    if isinstance(parsed, dict) and "constraints" in parsed:
+        for k, v in list(parsed["constraints"].items()):
+            parsed["constraints"][k] = _norm(v)
+
+    return {
+        "spec": parsed,
+        "path": str(Path(path).resolve()),
+        "raw": raw,
+    }
+
+
+# -----------------------------------------------------------------------------
+# Tool 2: compute_design_equations
+# -----------------------------------------------------------------------------
+@mcp.tool()
+async def compute_design_equations(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Compute the closed-form numbers that fall directly out of a spec:
+        gm_in    = 2π · GBW · CL                  (input-pair required gm)
+        I_tail   = SR · CL                        (tail current from slew rate)
+        I_branch = I_tail / 2                     (per-input-device current)
+        gm/Id_in = gm_in / I_branch               (implied current efficiency)
+        V*_in    = 2 / (gm/Id_in)                 (implied overdrive)
+
+    These are unique given the spec — no design choice involved.
+
+    Args:
+        spec: spec dict (as returned by parse_yaml_spec, or constructed inline)
+              Must contain spec['specs'] with GBW, CL, slew_rate (all in SI).
+
+    Returns:
+        Dict with derived quantities and the equations used (so the agent
+        can explain them to the user).
+    """
+    import math
+    try:
+        s = spec.get("specs", spec)  # tolerate either {specs:{...}} or flat dict
+        GBW = float(s["GBW"])
+        CL  = float(s["CL"])
+        SR  = float(s.get("slew_rate", s.get("SR", 0)))
+    except KeyError as e:
+        return {"error": f"missing spec field: {e}"}
+    except (TypeError, ValueError) as e:
+        return {"error": f"spec field not numeric: {e}"}
+
+    gm_in = 2 * math.pi * GBW * CL
+    I_tail = SR * CL if SR > 0 else None
+    I_branch = (I_tail / 2) if I_tail else None
+    gm_id_in = (gm_in / I_branch) if I_branch else None
+    V_star_in = (2.0 / gm_id_in) if gm_id_in else None
+
+    return {
+        "gm_in":      gm_in,
+        "gm_in_uS":   gm_in * 1e6,
+        "I_tail":     I_tail,
+        "I_tail_uA":  (I_tail * 1e6) if I_tail else None,
+        "I_branch":   I_branch,
+        "I_branch_uA": (I_branch * 1e6) if I_branch else None,
+        "gm_id_in":   gm_id_in,
+        "V_star_in":  V_star_in,
+        "equations_used": {
+            "gm_in":    "2 * pi * GBW * CL",
+            "I_tail":   "SR * CL",
+            "I_branch": "I_tail / 2",
+            "gm/Id":    "gm_in / I_branch",
+            "V_star":   "2 / (gm/Id)",
+        },
+        "notes": [
+            "V* = 2*Id/gm; matches PDF FoM-peak band (0.15-0.20V) when in moderate inversion"
+            if V_star_in and 0.10 < V_star_in < 0.30
+            else (f"V*={V_star_in:.3f}V is outside typical FoM-peak band"
+                  if V_star_in else "no SR spec given; SR-derived currents skipped"),
+        ],
+    }
+
+
+# -----------------------------------------------------------------------------
+# Tool 9: check_constraints
+# -----------------------------------------------------------------------------
+@mcp.tool()
+async def check_constraints(metrics: Dict[str, float],
+                            spec: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Compare measured/simulated metrics against the spec's pass/fail thresholds.
+
+    Spec items can be expressed as:
+        "GBW: 10MHz"          → exact match within tolerance
+        "DC_gain: '>= 60 dB'" → inequality
+        "power: '< 200 uW'"   → inequality
+    parse_yaml_spec normalizes numeric values; inequality strings are parsed
+    here.
+
+    Args:
+        metrics: dict of {name: float} from a simulation (e.g.
+                 {"GBW": 9.2e6, "DC_gain": 71.0, "PM": 64.0, "SR": 9.5e6,
+                  "power": 76e-6})
+        spec: spec dict (must have 'specs' key, as from parse_yaml_spec)
+
+    Returns:
+        Dict with:
+            - passed (bool): all checks ok
+            - per_spec: list of {name, target, measured, passed, margin_pct}
+            - violations: list of names that failed
+            - notes: human-readable summary lines
+    """
+    s = spec.get("specs", spec)
+    per_spec = []
+    violations = []
+
+    for name, target in s.items():
+        if name not in metrics:
+            per_spec.append({"name": name, "target": target,
+                             "measured": None, "passed": None,
+                             "note": "metric not provided"})
+            continue
+        m = float(metrics[name])
+
+        # Inequality string?
+        if isinstance(target, str):
+            tgt_stripped = target.strip()
+            op = None
+            if tgt_stripped.startswith(">="): op, num_str = ">=", tgt_stripped[2:]
+            elif tgt_stripped.startswith("<="): op, num_str = "<=", tgt_stripped[2:]
+            elif tgt_stripped.startswith(">"):  op, num_str = ">",  tgt_stripped[1:]
+            elif tgt_stripped.startswith("<"):  op, num_str = "<",  tgt_stripped[1:]
             else:
-                logger.warning(f"Could not generate netlist: final_best_x invalid (len={len(final_best_x) if final_best_x else 0})")
+                per_spec.append({"name": name, "target": target,
+                                 "measured": m, "passed": None,
+                                 "note": "unrecognized comparator"})
+                continue
+            # parse the number (could include unit; reuse parse_yaml_spec logic
+            # by treating it as a fresh string)
+            UNIT_MULT = {"f":1e-15,"p":1e-12,"n":1e-9,"u":1e-6,"m":1e-3,
+                         "k":1e3,"M":1e6,"G":1e9}
+            # Handle compound units first (longest match wins)
+            _compound = False
+            for cu, mult in [("V/us", 1e6), ("V/s", 1.0)]:
+                if num_str.endswith(cu):
+                    num_str_base = num_str[:-len(cu)].strip()
+                    try:
+                        # Strip a trailing SI prefix if any
+                        if num_str_base and num_str_base[-1] in UNIT_MULT:
+                            target_val = float(num_str_base[:-1]) * UNIT_MULT[num_str_base[-1]] * mult
+                        else:
+                            target_val = float(num_str_base) * mult
+                        _compound = True
+                    except ValueError:
+                        target_val = None
+                    break
+            if _compound:
+                pass  # already set
+            else:
+                for suf in ("Hz","F","V","A","s","W","dB","°"):
+                    if num_str.endswith(suf): num_str = num_str[:-len(suf)].strip(); break
+                if num_str and num_str[-1] in UNIT_MULT:
+                    try:
+                        target_val = float(num_str[:-1]) * UNIT_MULT[num_str[-1]]
+                    except ValueError:
+                        target_val = None
+                else:
+                    try: target_val = float(num_str)
+                    except ValueError: target_val = None
+            if target_val is None:
+                per_spec.append({"name": name, "target": target,
+                                 "measured": m, "passed": None,
+                                 "note": "could not parse target number"})
+                continue
+            passed = {">=": m >= target_val, "<=": m <= target_val,
+                      ">":  m >  target_val, "<":  m <  target_val}[op]
+            margin = ((m - target_val) / target_val * 100) if target_val else 0.0
+            per_spec.append({"name": name, "target": target,
+                             "target_val": target_val, "measured": m,
+                             "passed": passed, "margin_pct": margin})
+            if not passed:
+                violations.append(name)
+        else:
+            # Numeric target — treat as "approximately equal" with 5% tol
+            target_val = float(target)
+            passed = abs(m - target_val) / max(abs(target_val), 1e-12) < 0.05
+            margin = ((m - target_val) / target_val * 100) if target_val else 0.0
+            per_spec.append({"name": name, "target": target,
+                             "target_val": target_val, "measured": m,
+                             "passed": passed, "margin_pct": margin})
+            if not passed:
+                violations.append(name)
+
+    return {
+        "passed": len(violations) == 0,
+        "per_spec": per_spec,
+        "violations": violations,
+        "n_passed": sum(1 for p in per_spec if p.get("passed") is True),
+        "n_failed": len(violations),
+    }
 
 
-        except Exception as e:
-            logger.error(f"\n--- Task 'FocalOpt' Terminated Unexpectedly: {time.ctime()} ---")
-            logger.error("A fatal error caused the process to crash. Full traceback:")
-            logger.error(traceback.format_exc())
+# -----------------------------------------------------------------------------
+# Sizing notebook — Tools 10 & 11
+# -----------------------------------------------------------------------------
+# Persistent cross-turn state. Stored as JSON file on disk so it survives
+# server restarts and is inspectable by the user.
 
+_NOTEBOOK_PATH = Path(os.getenv("ASTRA_NOTEBOOK_DIR", "./notebooks"))
+_NOTEBOOK_PATH.mkdir(exist_ok=True)
+
+
+def _notebook_file(notebook_id: str) -> Path:
+    safe_id = "".join(c for c in notebook_id if c.isalnum() or c in "_-")
+    return _NOTEBOOK_PATH / f"{safe_id}.json"
+
+
+def _load_notebook(notebook_id: str) -> Dict[str, Any]:
+    fp = _notebook_file(notebook_id)
+    if not fp.exists():
+        return {"notebook_id": notebook_id, "created_at": datetime.now().isoformat(),
+                "entries": []}
+    with open(fp) as f:
+        return json.load(f)
+
+
+def _save_notebook(nb: Dict[str, Any]):
+    fp = _notebook_file(nb["notebook_id"])
+    with open(fp, "w") as f:
+        json.dump(nb, f, indent=2, default=str)
+
+
+@mcp.tool()
+async def notebook_append(
+        notebook_id: str,
+        turn: int,
+        decision: str,
+        rationale: str = "",
+        rejected_options: List[Dict[str, Any]] = None,
+        tool_calls: List[Dict[str, Any]] = None,
+        metrics: Dict[str, Any] = None,
+) -> Dict[str, Any]:
+    """
+    Append one decision to the sizing notebook for cross-turn memory.
+
+    Call this AFTER every user-confirmed design decision (topology choice,
+    L pick, W pick, fix-plan pick, etc.). Skip for pure formula evaluations
+    that don't represent a choice.
+
+    The notebook is the LLM's long-term memory across turns — it survives
+    context-window compression. Always pair with `notebook_summary()` at the
+    start of new decisions to recall prior context.
+
+    Args:
+        notebook_id: unique session ID (e.g. "5T_OTA_run01"). Create one per
+            sizing session; the user can name it or you can auto-generate.
+        turn: turn number in the conversation (1, 2, 3, ...)
+        decision: short statement of what was decided
+            (e.g. "topology = telescopic_cascode")
+        rationale: why this was chosen (1-2 sentences)
+        rejected_options: list of {description: str, reason_rejected: str}
+            so future turns can avoid revisiting closed branches
+        tool_calls: list of {tool: str, args: dict} called during this turn
+        metrics: any simulation metrics produced this turn
+
+    Returns:
+        Dict with ack + total entries in notebook.
+    """
+    try:
+        nb = _load_notebook(notebook_id)
+        nb["entries"].append({
+            "turn": turn,
+            "timestamp": datetime.now().isoformat(),
+            "decision": decision,
+            "rationale": rationale,
+            "rejected_options": rejected_options or [],
+            "tool_calls": tool_calls or [],
+            "metrics": metrics or {},
+        })
+        _save_notebook(nb)
+        return {
+            "notebook_id": notebook_id,
+            "total_entries": len(nb["entries"]),
+            "file": str(_notebook_file(notebook_id)),
+        }
     except Exception as e:
-        error_msg = f"Could not set up log file '{output_filename}' or failed to import 'focal_opt_logic', 'FocalOpt' task aborted. Error: {e}"
-        print(error_msg)
-        try:
-            logger.error(error_msg)
-            logger.error(traceback.format_exc())
-        except:
-            pass
-
-    print(f"Background task 'FocalOpt' finished, logs written to: {os.path.abspath(output_filename)}")
-    # Close logger handlers
-    file_handler.close()
-    logger.removeHandler(file_handler)
-
-
-# --- Task Management Tools ---
-
-# Global thread pool and task dictionary
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
-running_tasks = {}
-
-
-
+        return {"error": f"notebook write failed: {e}",
+                "traceback": traceback.format_exc()}
 
 
 @mcp.tool()
-async def find_initial_design(
-        gmid1: int,
-        gmid2: int,
-        gmid3: int,
-        gmid4: int,
-        gmid5: int,
-        iterations: int = 1200
+async def notebook_summary(
+        notebook_id: str,
+        last_n_turns: int = None,
 ) -> Dict[str, Any]:
     """
-    Starts a background Bayesian Optimization task (find_initial_design) to find an initial feasible circuit design.
+    Read the sizing notebook for a session. Use this at the START of any
+    new design decision to recall what's already been decided and what
+    branches were ruled out — prevents re-litigating closed choices.
 
     Args:
-        gmid1: gmid value for transistors M1 and M2.
-        gmid2: gmid value for transistors M3 and M4.
-        gmid3: gmid value for transistors M5 and M6.
-        gmid4: gmid value for transistors M7 and M8.
-        gmid5: gmid value for transistor M9.
-        iterations: Maximum number of Bayesian Optimization iterations (default 1200).
+        notebook_id: session ID
+        last_n_turns: if set, return only the last N turns (for compact
+            context refresh). Default: return everything.
 
     Returns:
-        A dictionary containing the task ID and status information.
+        Dict with:
+            - notebook_id, created_at
+            - n_entries: total decisions logged
+            - locked_decisions: list of {turn, decision} — what's been frozen
+            - rejected_branches: list of {decision_context, option, reason}
+                across all turns — for the LLM to avoid suggesting again
+            - recent_metrics: latest simulation results, if any
     """
-    task_id = f"{int(time.time())}"
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    output_filename = f"find_design_results_{timestamp}_{task_id}.log"
+    try:
+        nb = _load_notebook(notebook_id)
+    except Exception as e:
+        return {"error": f"could not load notebook: {e}"}
 
-    future = executor.submit(
-        _run_find_initial_design_task,
-        gmid1, gmid2, gmid3, gmid4, gmid5,
-        iterations,
-        task_id,
-        output_filename
-    )
+    entries = nb.get("entries", [])
+    if last_n_turns is not None:
+        entries = entries[-last_n_turns:]
 
-    running_tasks[task_id] = {
-        'future': future,
-        'output_file': output_filename,
-        'start_time': time.time()
-    }
+    locked = [{"turn": e["turn"], "decision": e["decision"],
+               "rationale": e.get("rationale", "")} for e in entries]
+
+    rejected = []
+    for e in entries:
+        for opt in e.get("rejected_options", []):
+            if isinstance(opt, dict):
+                rejected.append({
+                    "decision_turn": e["turn"],
+                    "decision_context": e["decision"],
+                    "option": opt.get("description", str(opt)),
+                    "reason": opt.get("reason_rejected", ""),
+                })
+            else:
+                rejected.append({
+                    "decision_turn": e["turn"],
+                    "decision_context": e["decision"],
+                    "option": str(opt),
+                    "reason": "",
+                })
+
+    recent_metrics = {}
+    for e in reversed(entries):
+        if e.get("metrics"):
+            recent_metrics = e["metrics"]
+            break
 
     return {
-        "status": "task_started",
-        "task_id": task_id,
-        "message": f"Task started, ID: {task_id}",
-        "output_file": os.path.abspath(output_filename)
+        "notebook_id": notebook_id,
+        "created_at": nb.get("created_at"),
+        "n_entries": len(nb.get("entries", [])),
+        "locked_decisions": locked,
+        "rejected_branches": rejected,
+        "recent_metrics": recent_metrics,
     }
 
 
+# -----------------------------------------------------------------------------
+# Tools 7 & 8 — Simulator wrappers (STUBS pending Garrett's AutoSizer plug-in)
+# -----------------------------------------------------------------------------
+# These tools will be implemented once Garrett finishes refactoring AutoSizer's
+# netlist generator and ngspice runner to be MCP-callable. Stubs are provided
+# so Claude Code sees the full tool list and AGENT.md can reference them.
+
 @mcp.tool()
-async def FocalOpt(
-        initial_design_task_id: str,
-        iterations: int = 450  # 450 = 50 + 100 + 100 + 200 (approx. total for all stages)
+async def generate_netlist(
+        yaml_path: str,
+        sizing: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    Starts the ASTRA-FocalOpt (Stage 2 optimization) task, focusing the optimization on the Stage 1 results.
+    [STUB — pending Garrett's AutoSizer integration]
+
+    Generate an ngspice-runnable netlist by filling AutoSizer's template
+    with the chosen sizing parameters.
 
     Args:
-        initial_design_task_id: The Task ID from the Stage 1 (find_initial_design) task.
-        iterations: The total maximum number of iterations for the FocalOpt stages (default 450).
+        yaml_path: path to the AutoSizer YAML spec (contains topology template)
+        sizing: dict mapping device names → {W, L, ...}, e.g.
+                {"M1": {"W": 7e-6, "L": 0.7e-6}, ...}
 
     Returns:
-        A dictionary containing the task ID and status information.
+        Dict with netlist_path: filesystem path to the generated .cir file
     """
-    task_id = f"focalopt_{int(time.time())}"
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    output_filename = f"focalopt_results_{timestamp}_{task_id}.log"
-
-    future = executor.submit(
-        _run_focal_opt_task,
-        initial_design_task_id,
-        iterations,
-        task_id,
-        output_filename
-    )
-
-    running_tasks[task_id] = {
-        'future': future,
-        'output_file': output_filename,
-        'start_time': time.time()
-    }
-
-    return {
-        "status": "task_started",
-        "task_id": task_id,
-        "message": f"FocalOpt task started, ID: {task_id}",
-        "output_file": os.path.abspath(output_filename)
-    }
+    return {"error": "generate_netlist not yet plugged in — "
+                     "blocked on Garrett's AutoSizer refactor",
+            "stub": True,
+            "requested_yaml": yaml_path,
+            "requested_sizing": sizing}
 
 
 @mcp.tool()
-async def check_task_status(task_id: str) -> Dict[str, Any]:
+async def run_single_sim(
+        netlist_path: str,
+        testbench: List[str] = None,
+) -> Dict[str, Any]:
     """
-    Checks the status of a background task (find_initial_design, or FocalOpt).
+    [STUB — pending Garrett's AutoSizer integration]
+
+    Run one ngspice simulation on a netlist and parse the requested metrics.
 
     Args:
-        task_id: The ID of the task to check.
+        netlist_path: path to .cir file (from generate_netlist)
+        testbench: list of analyses to run, e.g. ["ac", "dc", "tran"]
 
     Returns:
-        A dictionary containing the task status ("running", "completed", "failed", "not_found").
+        Dict with metrics: {"GBW": ..., "DC_gain": ..., "PM": ..., ...}
     """
-    if task_id not in running_tasks:
-        return {"status": "not_found", "message": "Task not found"}
+    return {"error": "run_single_sim not yet plugged in — "
+                     "blocked on Garrett's AutoSizer refactor",
+            "stub": True,
+            "requested_netlist": netlist_path,
+            "requested_testbench": testbench or ["ac", "dc"]}
 
-    task = running_tasks[task_id]
-    future = task['future']
 
-    if future.done():
-        try:
-            future.result()
-            return {"status": "completed", "output_file": os.path.abspath(task['output_file'])}
-        except Exception as e:
-            print(f"Task {task_id} failed: {e}")
-            return {"status": "failed", "error": str(e), "output_file": os.path.abspath(task['output_file'])}
-    else:
-        runtime = time.time() - task['start_time']
-        return {"status": "running", "runtime_seconds": runtime}
+# -----------------------------------------------------------------------------
+# Tool 12: freeze_design_and_export_to_autosizer_yaml
+# -----------------------------------------------------------------------------
+@mcp.tool()
+async def freeze_design_and_export_to_autosizer_yaml(
+        notebook_id: str,
+        output_path: str,
+        sizing: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Finalize an initial design and export it as an AutoSizer-compatible YAML
+    seed file for the downstream BO refinement stage.
+
+    Call this once `check_constraints` reports all specs ✓.
+
+    Args:
+        notebook_id: the sizing session to freeze
+        output_path: where to write the YAML
+        sizing: final per-device {W, L, Id} dict
+
+    Returns:
+        Dict with path of written YAML and a summary of frozen choices.
+    """
+    try:
+        import yaml
+    except ImportError:
+        return {"error": "PyYAML not installed; run `pip install pyyaml`"}
+
+    try:
+        nb = _load_notebook(notebook_id)
+    except Exception as e:
+        return {"error": f"could not load notebook: {e}"}
+
+    out_doc = {
+        "exported_from": "ASTRA vibe-sizing initial design",
+        "notebook_id": notebook_id,
+        "exported_at": datetime.now().isoformat(),
+        "sizing": sizing,
+        "design_history": [
+            {"turn": e["turn"], "decision": e["decision"]}
+            for e in nb.get("entries", [])
+        ],
+    }
+    try:
+        with open(output_path, "w") as f:
+            yaml.safe_dump(out_doc, f, sort_keys=False, default_flow_style=False)
+    except Exception as e:
+        return {"error": f"failed to write YAML: {e}"}
+
+    return {
+        "output_path": str(Path(output_path).resolve()),
+        "n_decisions_logged": len(nb.get("entries", [])),
+        "sizing_summary": sizing,
+    }
 
 
 # Start the server
@@ -517,4 +871,3 @@ if __name__ == "__main__":
 
     print("RAG Server is running, waiting for client connection...")
     mcp.run()
-

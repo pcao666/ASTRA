@@ -339,7 +339,7 @@ def write_data_OTA_two_gmid_pro(filename, cap=3e-12, k1=1, k2=8, l1=2e-6, l2=2e-
 
     # 1. Calculate W based on L, ID, and GM/ID
     # ID is derived from the total bias current (implicitly 40uA) and k ratios
-    W_MIN = 180e-9  # Minimum allowed width
+    W_MIN = 220e-9  # Minimum allowed width — GF180MCU 3.3V
 
     w1 = calculate_w_linear_NMOS_pro(l1, 20e-6 * k1, gmid1)
     if w1 < W_MIN:
